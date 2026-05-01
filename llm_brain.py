@@ -99,7 +99,11 @@ def extract_game_state():
                         
                         # 100 means a 10-tile radius
                         if dist_sq < 100:
-                            # Retrieve Affordances (handle both list and generator/method)
+                            # Limit total nearby objects to the 15 closest to save tokens
+                            if len(nearby_objects) >= 15:
+                                continue
+                                
+                            # Retrieve Affordances
                             affordance_attr = getattr(obj, 'super_affordances', None)
                             if callable(affordance_attr):
                                 try:
@@ -116,45 +120,39 @@ def extract_game_state():
                                 obj_name = f"Sim: {getattr(obj.sim_info, 'first_name', '')}"
                             else:
                                 obj_name = getattr(obj.definition, 'name', None) if hasattr(obj, 'definition') else None
-                                # If the name is blank or None, fall back to the raw class name
                                 if not obj_name:
                                     obj_name = obj.__class__.__name__
                                     
-                            # Extract meaningful interactions (filtering out purely internal ones)
+                            # Extract meaningful interactions
                             available_interactions = {}
                             for aff in affordances:
+                                # Cap at 10 interactions per object to prevent context bloat
+                                if len(available_interactions) >= 10:
+                                    break
+                                    
                                 aff_name = getattr(aff, '__name__', '')
-                                
-                                # Skip obvious debug/internal interactions
-                                if aff_name.startswith('debug_') or 'cheat' in aff_name.lower():
+                                if not aff_name or aff_name.startswith('debug_') or 'cheat' in aff_name.lower():
                                     continue
                                     
-                                # Try to get the localized display name that the player sees
-                                display_name_factory = getattr(aff, 'display_name', None)
-                                if display_name_factory is not None:
-                                    try:
-                                        # In TS4, display_name is often a factory that needs to be called
-                                        # Or it might have a _string_id or string_id we could potentially resolve
-                                        # For now, if we can't easily resolve the localized string, we'll
-                                        # clean up the internal tuning name to be readable by the LLM.
-                                        # E.g., "piano_Practice_Standard" -> "Piano Practice Standard"
-                                        readable_name = aff_name.replace('_', ' ').title()
-                                        
-                                        # Store a mapping of the readable name back to the exact tuning name
-                                        # so the LLM can use the readable name, and we can still push the right affordance.
-                                        available_interactions[readable_name] = aff_name
-                                    except Exception:
-                                        pass
+                                # Heuristic: Skip very short internal names that are usually technical
+                                if len(aff_name) < 5:
+                                    continue
+                                    
+                                readable_name = aff_name.replace('_', ' ').title()
+                                available_interactions[readable_name] = aff_name
                                         
                             if available_interactions:
                                 nearby_objects.append({
                                     "id": obj.id,
                                     "name": obj_name,
+                                    "dist": round(dist_sq**0.5, 1),
                                     "interactions": available_interactions
                                 })
                     except Exception:
-                        # Silently skip any individual object that causes an error to protect the scan
                         continue
+            
+            # Sort by distance so the LLM sees the closest things first
+            nearby_objects.sort(key=lambda x: x.get("dist", 999))
         except Exception as e:
             nearby_objects.append({"error": str(e)})
             
