@@ -206,8 +206,8 @@ def network_worker():
             req.add_header('Content-Type', 'application/json; charset=utf-8')
             jsondata = json.dumps(state).encode('utf-8')
             
-            # Send state and wait for response (timeout is crucial here)
-            response = urllib.request.urlopen(req, jsondata, timeout=3)
+            # Send state and wait for response (timeout is increased for local LLMs)
+            response = urllib.request.urlopen(req, jsondata, timeout=60)
             resp_data = json.loads(response.read().decode('utf-8'))
             
             incoming_queue.put(resp_data)
