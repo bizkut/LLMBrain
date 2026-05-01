@@ -184,77 +184,98 @@ def execute_command(command):
     global LAST_BRAIN_ERROR, LAST_ACTION_STATUS
     try:
         sim_id = int(command.get("sim_id") or 0)
-        # 1. Handle Cancellation Command first (it doesn't have a target_id)
+        # 1. Handle Cancellation Command first
         if command.get("action") == "cancel":
             LAST_ACTION_STATUS = f"CANCELLED: Dropped action for Sim {sim_id}"
             llm_action = ACTIVE_LLM_ACTIONS.pop(sim_id, None)
             if llm_action is not None:
                 try:
-                    # 1 is the typical SCRIPT_COMMAND CancelReason in TS4
                     llm_action.cancel(1, "LLM Want Disappeared")
                 except Exception:
-                    pass # Silently fail if interaction is already resolving
+                    pass 
             return
             
-        # 2. Extract and scrub target_id (in case LLM sent "12345:Bed")
+        # Check if Sim is already busy with an LLM action
+        if sim_id in ACTIVE_LLM_ACTIONS:
+            # Verify if it's still running
+            active_sim_info = services.sim_info_manager().get(sim_id)
+            active_sim = active_sim_info.get_sim_instance() if active_sim_info else None
+            if active_sim:
+                existing = ACTIVE_LLM_ACTIONS[sim_id]
+                in_si = active_sim.si_state is not None and existing in active_sim.si_state
+                in_queue = getattr(active_sim, 'queue', None) is not None and existing in active_sim.queue
+                if in_si or in_queue:
+                    LAST_ACTION_STATUS = f"SKIPPED: Sim {sim_id} is already busy with an LLM action"
+                    return
+                else:
+                    ACTIVE_LLM_ACTIONS.pop(sim_id, None)
+
+        # 2. Extract and scrub target_id
         raw_target = str(command.get("target_object_id", "0")).split(':')[0].strip()
         target_id = int(raw_target) if raw_target.isdigit() else 0
         interaction_name = str(command.get("interaction_name", ""))
         
-        if not sim_id:
-            LAST_ACTION_STATUS = "FAILED: No sim_id provided by LLM"
-            return
-        if not target_id:
-            LAST_ACTION_STATUS = f"FAILED: Invalid target_id '{raw_target}' provided by LLM"
+        if not sim_id or not target_id:
+            LAST_ACTION_STATUS = f"FAILED: Invalid IDs (Sim:{sim_id}, Target:{target_id})"
             return
             
         sim_info = services.sim_info_manager().get(sim_id)
-        if not sim_info: 
-            LAST_ACTION_STATUS = f"FAILED: Sim {sim_id} not found in manager"
-            return
-        sim = sim_info.get_sim_instance()
+        sim = sim_info.get_sim_instance() if sim_info else None
         if not sim: 
-            LAST_ACTION_STATUS = f"FAILED: Sim {sim_id} has no instance"
+            LAST_ACTION_STATUS = f"FAILED: Sim {sim_id} not found/instanced"
             return
             
         target = services.object_manager().get(target_id)
-        # If the target is another Sim, they might only be in the sim_info_manager
         if not target:
             t_info = services.sim_info_manager().get(target_id)
-            if t_info:
-                target = t_info.get_sim_instance()
-            if not target: 
-                LAST_ACTION_STATUS = f"FAILED: Target object {target_id} not found"
-                return
+            target = t_info.get_sim_instance() if t_info else None
             
-        affordances = getattr(target, 'super_affordances', []) or getattr(target, '_super_affordances', [])
+        if not target: 
+            LAST_ACTION_STATUS = f"FAILED: Target {target_id} not found"
+            return
+            
+        # 3. Retrieve Affordances (handle both list and generator/method)
+        affordance_attr = getattr(target, 'super_affordances', None)
+        if callable(affordance_attr):
+            try:
+                affordances = list(target.super_affordances())
+            except Exception:
+                affordances = getattr(target, '_super_affordances', [])
+        else:
+            affordances = getattr(target, '_super_affordances', [])
+            
         if not affordances: 
-            LAST_ACTION_STATUS = f"FAILED: Target object {target_id} has no interactions"
+            LAST_ACTION_STATUS = f"FAILED: Target {target_id} has no interactions"
             return
         
-        search_str = interaction_name.lower().replace(" ", "_")
-        affordance_to_push = None
+        # 4. Smart Matching Logic
+        search_words = interaction_name.lower().replace(" ", "_").split("_")
+        scored_affordances = []
         
-        # 1. Exact or Substring match (e.g. "play_piano" in "piano_Play")
         for aff in affordances:
             aff_name = getattr(aff, '__name__', '').lower()
-            if search_str in aff_name:
-                affordance_to_push = aff
-                break
-                
-        # 2. Fuzzy word match (e.g. match just "piano")
-        if not affordance_to_push:
-            for aff in affordances:
-                aff_name = getattr(aff, '__name__', '').lower()
-                if any(len(w) > 3 and w in aff_name for w in search_str.split('_')):
-                    affordance_to_push = aff
-                    break
-                    
-        # 3. Fallback: If the LLM hallucinated, just pick the first available interaction
-        if not affordance_to_push:
+            score = 0
+            # Full match is best
+            if "_".join(search_words) in aff_name:
+                score += 10
+            # Individual word matches
+            for word in search_words:
+                if len(word) > 2 and word in aff_name:
+                    score += 2
+            
+            if score > 0:
+                scored_affordances.append((score, aff))
+        
+        # Sort by score descending
+        scored_affordances.sort(key=lambda x: x[0], reverse=True)
+        
+        if scored_affordances:
+            affordance_to_push = scored_affordances[0][1]
+        else:
+            # Fallback to first available if requested name is totally unknown
             affordance_to_push = next(iter(affordances))
             
-        # Inject the action into the Sim's queue at the END of their current queue
+        # 5. Push Interaction
         context = interactions.context.InteractionContext(
             sim,
             interactions.context.InteractionContext.SOURCE_AUTONOMY,
