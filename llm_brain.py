@@ -99,8 +99,16 @@ def extract_game_state():
                         
                         # 100 means a 10-tile radius
                         if dist_sq < 100:
-                            # Only include objects that have interactions (super_affordances)
-                            affordances = getattr(obj, '_super_affordances', []) or getattr(obj, 'super_affordances', [])
+                            # Retrieve Affordances (handle both list and generator/method)
+                            affordance_attr = getattr(obj, 'super_affordances', None)
+                            if callable(affordance_attr):
+                                try:
+                                    affordances = list(obj.super_affordances())
+                                except Exception:
+                                    affordances = getattr(obj, '_super_affordances', [])
+                            else:
+                                affordances = getattr(obj, '_super_affordances', [])
+                                
                             if not affordances:
                                 continue
                                 
@@ -111,13 +119,44 @@ def extract_game_state():
                                 # If the name is blank or None, fall back to the raw class name
                                 if not obj_name:
                                     obj_name = obj.__class__.__name__
+                                    
+                            # Extract meaningful interactions (filtering out purely internal ones)
+                            available_interactions = {}
+                            for aff in affordances:
+                                aff_name = getattr(aff, '__name__', '')
                                 
-                            nearby_objects.append(f"{obj.id}:{obj_name}")
+                                # Skip obvious debug/internal interactions
+                                if aff_name.startswith('debug_') or 'cheat' in aff_name.lower():
+                                    continue
+                                    
+                                # Try to get the localized display name that the player sees
+                                display_name_factory = getattr(aff, 'display_name', None)
+                                if display_name_factory is not None:
+                                    try:
+                                        # In TS4, display_name is often a factory that needs to be called
+                                        # Or it might have a _string_id or string_id we could potentially resolve
+                                        # For now, if we can't easily resolve the localized string, we'll
+                                        # clean up the internal tuning name to be readable by the LLM.
+                                        # E.g., "piano_Practice_Standard" -> "Piano Practice Standard"
+                                        readable_name = aff_name.replace('_', ' ').title()
+                                        
+                                        # Store a mapping of the readable name back to the exact tuning name
+                                        # so the LLM can use the readable name, and we can still push the right affordance.
+                                        available_interactions[readable_name] = aff_name
+                                    except Exception:
+                                        pass
+                                        
+                            if available_interactions:
+                                nearby_objects.append({
+                                    "id": obj.id,
+                                    "name": obj_name,
+                                    "interactions": available_interactions
+                                })
                     except Exception:
                         # Silently skip any individual object that causes an error to protect the scan
                         continue
         except Exception as e:
-            nearby_objects.append(f"Error: {e}")
+            nearby_objects.append({"error": str(e)})
             
         # Extract Motives (Needs)
         motives = {}
