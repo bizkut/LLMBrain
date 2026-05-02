@@ -159,22 +159,37 @@ async def receive_state(request: Request):
 
     # 1. Process Dialogs (Serial, as they often block the game)
     for d in state.get("active_dialogs", []):
-        choices = [f"Btn {r['id']}: {r['text']}" for r in d.get("responses", [])]
+        d_id = d['id']
+        d_owner = d['owner']
+        d_tuning = d['tuning']
         d_title = ", ".join(d.get("title", {}).get("tokens", [])) or "No Title"
         d_text = ", ".join(d.get("text", {}).get("tokens", [])) or "No Description"
         
-        print(f"📞 Intercepted {d['tuning']} for {d['owner']}: {d_title}")
+        # Format buttons
+        responses = [f"Btn {r['id']}: {r['text']}" for r in d.get("responses", [])]
+        
+        # Format grid items if this is a Picker
+        picker_info = ""
+        picker_items = d.get("picker_items", [])
+        if picker_items:
+            items_str = ", ".join([f"{i['name']} (ID: {i['id']})" for i in picker_items[:20]])
+            picker_info = f"\nSelection Grid Items: [{items_str}]"
+
+        print(f"📞 Intercepted {d_tuning} for {d_owner}: {d_title}")
         
         prompt = f"""
         Role: Sims 4 Controller.
-        Owner: {d['owner']}
-        Dialog Type: {d['tuning']}
+        Owner: {d_owner}
+        Dialog Type: {d_tuning}
         Title: {d_title}
-        Message: {d_text}
-        Available Buttons: [{', '.join(choices)}]
+        Message: {d_text}{picker_info}
+        Available Buttons: [{', '.join(responses)}]
         
-        Goal: Pick the best response button.
-        Return ONLY JSON: {{"dialog_id": {d['id']}, "response_id": ID, "reason": "Why?"}}
+        Goal: Pick the best path. 
+        - If there is a Selection Grid, you MUST pick one Item ID from it and return it as 'picked_id'.
+        - Otherwise, pick a Button ID and return it as 'response_id'.
+        
+        Return ONLY JSON: {{"dialog_id": {d_id}, "picked_id": ITEM_ID, "response_id": BUTTON_ID, "reason": "Why?"}}
         """
         
         try:
