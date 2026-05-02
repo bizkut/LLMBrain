@@ -231,11 +231,9 @@ def extract_game_state():
         # Extract Motives (Needs)
         motives = {}
         try:
-            # Commodities include Hunger, Energy, Bladder, etc.
             tracker = getattr(sim, 'commodity_tracker', None)
             if tracker is not None:
                 for stat in tracker:
-                    # Filter for visible motives that typically appear in the UI
                     if getattr(stat, 'visible', False) and getattr(stat, 'ui_sort_order', 0) > 0:
                         stat_name = stat.__class__.__name__
                         if stat_name.startswith('motive_'):
@@ -245,12 +243,48 @@ def extract_game_state():
                         min_val = getattr(stat, 'min_value', -100)
                         max_val = getattr(stat, 'max_value', 100)
                         
-                        # Normalize to 0-100 scale for LLM consistency
                         if max_val > min_val:
                             normalized = (val - min_val) / (max_val - min_val) * 100
                             motives[stat_name] = round(normalized, 1)
         except Exception:
-            pass # Fail gracefully if motives can't be read
+            pass 
+
+        # Extract Satisfaction Points and available Rewards
+        satisfaction_points = 0
+        try:
+            satisfaction_points = sim_info.get_satisfaction_points()
+            
+            # If they have points, show them a virtual "Rewards Store" object
+            if satisfaction_points > 0:
+                tracker = getattr(sim_info, '_satisfaction_tracker', None)
+                if tracker:
+                    store_items = {}
+                    # Limit to top 8 affordable rewards to save context
+                    count = 0
+                    for reward, data in tracker.SATISFACTION_STORE_ITEMS.items():
+                        if count >= 8: break
+                        if data.cost <= satisfaction_points:
+                            # Only show rewards that pass the Sim's internal tests (age, traits, etc.)
+                            if reward.is_valid(sim_info):
+                                r_name = reward.__name__
+                                if r_name.startswith('reward_'): r_name = r_name[7:]
+                                # Format name: "AlwaysWelcome" -> "Always Welcome (500)"
+                                import re
+                                clean_name = re.sub(r'(?<!^)(?=[A-Z])', ' ', r_name).strip().title()
+                                display_name = f"Buy {clean_name} ({data.cost}pts)"
+                                # Store the mapping: Readable -> internal reward ID
+                                store_items[display_name] = f"PURCHASE_{reward.guid64}"
+                                count += 1
+                    
+                    if store_items:
+                        nearby_objects.append({
+                            "id": 999, # Virtual ID for the store
+                            "name": "Rewards Store",
+                            "dist": 0.0,
+                            "interactions": store_items
+                        })
+        except Exception:
+            pass
 
         sim_name = f"{getattr(sim_info, 'first_name', '')} {getattr(sim_info, 'last_name', '')}".strip()
         state["sims"].append({
@@ -258,6 +292,7 @@ def extract_game_state():
             "name": sim_name,
             "mood": mood,
             "moodlets": moodlets,
+            "satisfaction_points": satisfaction_points,
             "is_sleeping": is_sleeping,
             "current_actions": current_actions,
             "wants": wants,
@@ -322,6 +357,21 @@ def execute_command(command):
                     return
                 else:
                     ACTIVE_LLM_ACTIONS.pop(sim_id, None)
+
+        # Handle virtual "Rewards Store" purchase
+        if str(interaction_name).startswith("PURCHASE_"):
+            try:
+                reward_guid = int(interaction_name.split("_")[1])
+                tracker = getattr(sim_info, '_satisfaction_tracker', None)
+                if tracker:
+                    # Execute the game's internal purchase method
+                    tracker.purchase_satisfaction_reward(reward_guid)
+                    LAST_ACTION_STATUS = f"SUCCESS: Sim {sim_id} purchased reward {reward_guid}"
+                else:
+                    LAST_ACTION_STATUS = f"FAILED: No satisfaction tracker for Sim {sim_id}"
+            except Exception as e:
+                LAST_ACTION_STATUS = f"FAILED: Purchase error: {e}"
+            return
 
         # 2. Extract and scrub target_id
         raw_target = str(command.get("target_object_id", "0")).split(':')[0].strip()
