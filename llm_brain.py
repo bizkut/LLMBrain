@@ -69,8 +69,24 @@ def extract_game_state():
                 for slot in whim_slots:
                     whim_class = getattr(slot, 'whim', None)
                     if whim_class is not None:
+                        # Skip Build Mode / Purchase whims that Sims can't do themselves
+                        goal_type = getattr(whim_class, 'goal', None)
+                        goal_name = goal_type.__name__ if goal_type else ""
+                        
+                        is_build_whim = False
+                        if "PurchasedObject" in goal_name or "LotTileCount" in goal_name:
+                            is_build_whim = True
+                        
+                        # Also check the whim name for keywords just in case
+                        whim_name = whim_class.__name__
+                        if any(x in whim_name.lower() for x in ['_buy', '_purchase', '_addroom', '_build']):
+                            is_build_whim = True
+                            
+                        if is_build_whim:
+                            continue
+                            
                         # Clean up class name: "whim_PlayPiano" -> "Play Piano"
-                        name = whim_class.__name__
+                        name = whim_name
                         if name.lower().startswith('whim_'):
                             name = name[5:]
                         # Add spaces before capital letters
