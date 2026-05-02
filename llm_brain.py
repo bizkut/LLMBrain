@@ -79,6 +79,16 @@ def extract_game_state():
                         
             # Check if the LLM action is currently running or in the queue
             has_llm_action = False
+            current_actions = []
+            
+            if sim.si_state is not None:
+                for si in sim.si_state:
+                    si_name = si.__class__.__name__
+                    # Skip common idle/posture interactions to focus on "real" actions
+                    if any(x in si_name.lower() for x in ['idle', 'posture', 'stand', 'wait']):
+                        continue
+                    current_actions.append(si_name)
+                    
             llm_action = ACTIVE_LLM_ACTIONS.get(sim.id)
             if llm_action is not None:
                 in_si = sim.si_state is not None and llm_action in sim.si_state
@@ -200,6 +210,7 @@ def extract_game_state():
             "name": sim_name,
             "mood": mood,
             "is_sleeping": is_sleeping,
+            "current_actions": current_actions,
             "wants": wants,
             "motives": motives,
             "has_llm_action": has_llm_action,
@@ -362,6 +373,10 @@ def brain_tick(_):
         # 2. Extract current state and send to background thread
         state = extract_game_state()
         if state:
+            # Clear the outgoing queue before putting the fresh state in.
+            # This ensures the background thread only processes the MOST RECENT state.
+            with outgoing_queue.mutex:
+                outgoing_queue.queue.clear()
             outgoing_queue.put(state)
         LAST_BRAIN_ERROR = "OK"
     except Exception as e:
