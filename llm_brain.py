@@ -77,6 +77,21 @@ def extract_game_state():
                     ACTIVE_DIALOGS.pop(dialog_id, None)
                     continue
                 
+                # Extract button options
+                responses = []
+                if hasattr(dialog, '_get_responses_gen'):
+                    responses = list(dialog._get_responses_gen())
+                elif hasattr(dialog, 'responses'):
+                    responses = dialog.responses
+                
+                # OPTIMIZATION: If there is only one button (like an 'OK' box), 
+                # handle it locally and don't waste the LLM's tokens!
+                if len(responses) == 1:
+                    r_id = responses[0].dialog_response_id
+                    dialog_service.dialog_respond(dialog_id, r_id)
+                    ACTIVE_DIALOGS.pop(dialog_id, None)
+                    continue
+
                 # Identify if this dialog is blocking/pausing the game
                 is_modal = dialog.get_phone_ring_type() == 0 # Non-phone dialogs are usually modal
                 
@@ -95,13 +110,6 @@ def extract_game_state():
                     "title_hash": str(getattr(dialog.title, '_string_id', '0')),
                     "responses": []
                 }
-                
-                # Extract button options
-                responses = []
-                if hasattr(dialog, '_get_responses_gen'):
-                    responses = list(dialog._get_responses_gen())
-                elif hasattr(dialog, 'responses'):
-                    responses = dialog.responses
                 
                 for response in responses:
                     # In TS4, response IDs are things like 10001 (OK), 10002 (Cancel)
