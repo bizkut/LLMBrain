@@ -116,7 +116,7 @@ async def process_sim_logic(sim):
     6. AUTONOMY: Pick a fun interaction fitting personality/Mood.
 
     Match the 'Want' or 'Moodlet Reason' to the best available action.
-    Return ONLY JSON: {"target_object_id": ID, "interaction_name": "EXACT_NAME", "reason": "Tier X - Why? (e.g., Tier 3 - Cleaning to fix Filthy surroundings)", "priority": "high" or "low"}
+    Return ONLY JSON: {{"target_object_id": ID, "interaction_name": "EXACT_NAME", "reason": "Tier X - Why? (e.g., Tier 3 - Cleaning to fix Filthy surroundings)", "priority": "high" or "low"}}
     """
 
     try:
