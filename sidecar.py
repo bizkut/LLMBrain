@@ -15,12 +15,16 @@ client = AsyncOpenAI(
 sim_history = {}
 
 def extract_json(text):
-    """Robustly extracts the first valid JSON object or list from LLM output."""
+    """Robustly extracts and cleans a single JSON object from LLM output."""
     try:
-        # Find the first occurrence of '{' or '['
+        # 1. Handle common LLM syntax hallucinations (Python-isms)
+        # Replacing None with null, True with true, False with false
+        text = text.replace(": None", ": null").replace(": True", ": true").replace(": False", ": false")
+
+        # 2. Extract first valid JSON structure
         start_obj = text.find('{')
         start_list = text.find('[')
-        
+...
         start = -1
         if start_obj != -1 and start_list != -1: start = min(start_obj, start_list)
         elif start_obj != -1: start = start_obj
