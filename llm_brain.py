@@ -92,7 +92,8 @@ def extract_game_state():
         # 2. Sim State Extraction
         for sim_info in client.selectable_sims:
             sim = sim_info.get_sim_instance()
-            if not sim:
+            # Skip if not instanced or not on the current lot
+            if not sim or not sim.is_on_active_lot():
                 continue
                 
             sim_name = str(sim_info.full_name).strip() or f"Sim_{sim.id}"
