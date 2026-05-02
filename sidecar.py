@@ -15,25 +15,27 @@ client = AsyncOpenAI(
 sim_history = {}
 
 def extract_json(text):
-    """Robustly extracts a single JSON object from potentially messy LLM output."""
+    """Robustly extracts the first valid JSON object or list from LLM output."""
     try:
-        # Remove Markdown code blocks if present
-        if "```" in text:
-            blocks = text.split("```")
-            for block in blocks:
-                if "{" in block and "}" in block:
-                    text = block
-                    if text.strip().startswith("json"):
-                        text = text.strip()[4:]
-                    break
+        # Find the first occurrence of '{' or '['
+        start_obj = text.find('{')
+        start_list = text.find('[')
         
-        start = text.find('{')
-        end = text.rfind('}')
-        if start == -1 or end == -1:
-            return None
-            
-        json_str = text[start:end+1].strip()
-        return json.loads(json_str)
+        start = -1
+        if start_obj != -1 and start_list != -1: start = min(start_obj, start_list)
+        elif start_obj != -1: start = start_obj
+        elif start_list != -1: start = start_list
+        
+        if start == -1: return None
+        
+        # Use raw_decode to parse only the first valid JSON structure it finds
+        decoder = json.JSONDecoder()
+        data, _ = decoder.raw_decode(text[start:])
+        
+        # If it's a list, take the first element (common LLM behavior)
+        if isinstance(data, list):
+            return data[0] if data else None
+        return data
     except Exception:
         return None
 
