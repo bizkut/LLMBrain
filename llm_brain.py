@@ -58,10 +58,15 @@ def extract_game_state():
                 # Extract Wants directly from the internal _whim_slots list
                 whim_slots = getattr(sim_info.whim_tracker, '_whim_slots', [])
                 for slot in whim_slots:
-                    # slot is a WhimSlotData object containing the tuning class
                     whim_class = getattr(slot, 'whim', None)
                     if whim_class is not None:
-                        wants.append(whim_class.__name__)
+                        # Clean up class name: "whim_PlayPiano" -> "Play Piano"
+                        name = whim_class.__name__
+                        if name.lower().startswith('whim_'):
+                            name = name[5:]
+                        # Add spaces before capital letters
+                        readable_name = "".join([" " + c if c.isupper() else c for c in name]).strip()
+                        wants.append(readable_name)
                         
             # Check if the LLM action is currently running or in the queue
             has_llm_action = False
