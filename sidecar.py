@@ -104,14 +104,19 @@ async def process_sim_logic(sim):
     {nearby_str}
     
     PRIORITY HIERARCHY (The Balanced Storyteller):
-    1. SURVIVAL: If any Need is < 25%, fulfill immediately using objects with '[Satisfies: NEED]'.
-    2. WHIMS/WANTS: If Needs > 25%, fulfill an 'Active Want'. You may purchase a Reward IF it helps a Want.
-    3. EMOTION: If Mood is negative, pick an action to fix the feeling based on Moodlets.
-    4. SELF-CARE: Address Needs < 70%.
-    5. MAINTENANCE: Clean/Repair nearby dirty or broken objects.
+    1. SURVIVAL: If any Need is < 25%, fulfill it immediately using objects with '[Satisfies: NEED]'.
+    2. WHIMS/WANTS: If Needs > 25%, fulfill an 'Active Want'. (You may purchase a Reward IF it helps).
+    3. EMOTION: If Mood is negative (Sad, Angry, Tense, Uncomfortable):
+       - If Uncomfortable due to 'Dirty', 'Filthy', or 'Puddle', you MUST choose 'Clean', 'Mop', or 'Scrub'.
+       - If Uncomfortable due to 'Grungy' or 'Smelly', you MUST choose 'Shower' or 'Bath'.
+       - If Sad/Angry, choose an action to process it (e.g., 'Cry', 'Punch Bag').
+       - DO NOT pick Hunger actions (Cooking/Eating) to fix an Uncomfortable mood unless Hunger is actually low.
+    4. SELF-CARE: Address any Need < 70%.
+    5. MAINTENANCE: Clean or Repair any dirty/broken objects nearby even if not in a bad mood.
     6. AUTONOMY: Pick a fun interaction fitting personality/Mood.
 
-    Return ONLY JSON: {{"target_object_id": ID, "interaction_name": "EXACT_NAME", "reason": "Tier X - Why?", "priority": "high" or "low"}}
+    Match the 'Want' or 'Moodlet Reason' to the best available action.
+    Return ONLY JSON: {"target_object_id": ID, "interaction_name": "EXACT_NAME", "reason": "Tier X - Why? (e.g., Tier 3 - Cleaning to fix Filthy surroundings)", "priority": "high" or "low"}
     """
 
     try:
