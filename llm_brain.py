@@ -123,11 +123,22 @@ def extract_game_state():
         try:
             sim_pos = getattr(sim, 'position', None)
             if sim_pos is not None:
+                # Create a context to check what interactions are ACTUALLY available
+                scan_context = interactions.context.InteractionContext(
+                    sim,
+                    interactions.context.InteractionContext.SOURCE_AUTONOMY,
+                    interactions.priority.Priority.High
+                )
+                
                 for obj in services.object_manager().get_all():
                     if obj.id == sim.id:
                         continue
                         
                     try:
+                        # Skip objects that are invisible to the client (markers, controllers, etc.)
+                        if not getattr(obj, 'visible_to_client', True):
+                            continue
+                            
                         # Skip objects hidden in inventories
                         if getattr(obj, 'parent', None) is not None:
                             continue
@@ -139,14 +150,11 @@ def extract_game_state():
                         # Calculate distance squared
                         dist_sq = (sim_pos.x - obj_pos.x)**2 + (sim_pos.y - obj_pos.y)**2 + (sim_pos.z - obj_pos.z)**2
                         
-                        # We no longer limit by distance (dist_sq < 100), 
-                        # allowing Sims to see objects across the whole lot.
-                        
-                        # Retrieve Affordances
+                        # Retrieve Affordances (passing context filters for currently valid actions)
                         affordance_attr = getattr(obj, 'super_affordances', None)
                         if callable(affordance_attr):
                             try:
-                                affordances = list(obj.super_affordances())
+                                affordances = list(obj.super_affordances(context=scan_context))
                             except Exception:
                                 affordances = getattr(obj, '_super_affordances', [])
                         else:
@@ -169,6 +177,10 @@ def extract_game_state():
                             if len(available_interactions) >= 10:
                                 break
                                 
+                            # Only include interactions that are visible (have a display name)
+                            if not hasattr(aff, 'display_name') or aff.display_name is None:
+                                continue
+                                
                             aff_name = getattr(aff, '__name__', '')
                             if not aff_name or aff_name.startswith('debug_') or 'cheat' in aff_name.lower():
                                 continue
@@ -179,6 +191,7 @@ def extract_game_state():
                             temp_name = aff_name.replace('_', ' ')
                             temp_name = re.sub(r'(?<!^)(?=[A-Z])', ' ', temp_name)
                             readable_name = temp_name.strip().title()
+                            
                             available_interactions[readable_name] = aff_name
                                     
                         if available_interactions:
