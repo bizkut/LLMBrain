@@ -54,6 +54,15 @@ def extract_game_state():
             if current_mood is not None:
                 mood = current_mood.__name__
                 
+            # Detect if Sim is sleeping
+            is_sleeping = getattr(sim, 'sleeping', False)
+            # Also check if any active interaction has "sleep" in the name
+            if not is_sleeping and sim.si_state is not None:
+                for si in sim.si_state:
+                    if 'sleep' in si.__class__.__name__.lower() or 'nap' in si.__class__.__name__.lower():
+                        is_sleeping = True
+                        break
+                
             if sim_info.whim_tracker is not None:
                 # Extract Wants directly from the internal _whim_slots list
                 whim_slots = getattr(sim_info.whim_tracker, '_whim_slots', [])
@@ -190,6 +199,7 @@ def extract_game_state():
             "id": sim.id,
             "name": sim_name,
             "mood": mood,
+            "is_sleeping": is_sleeping,
             "wants": wants,
             "motives": motives,
             "has_llm_action": has_llm_action,
