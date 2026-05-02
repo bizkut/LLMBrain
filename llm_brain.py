@@ -72,18 +72,27 @@ def extract_game_state():
     if dialog_service is not None:
         for dialog_id, dialog in list(ACTIVE_DIALOGS.items()):
             try:
-                # Check if the dialog is still active in the game service
+                # Check if the dialog is still active
                 if dialog_id not in dialog_service._active_dialogs:
                     ACTIVE_DIALOGS.pop(dialog_id, None)
                     continue
-                    
+                
+                # Identify if this dialog is blocking/pausing the game
+                is_modal = dialog.get_phone_ring_type() == 0 # Non-phone dialogs are usually modal
+                
+                # Identify which Sim this belongs to
+                owner_name = "Unknown"
+                if hasattr(dialog, 'owner') and dialog.owner is not None:
+                    owner_name = f"{getattr(dialog.owner.sim_info, 'first_name', '')} {getattr(dialog.owner.sim_info, 'last_name', '')}".strip()
+                
                 # Extract basic info
                 dialog_data = {
                     "id": dialog_id,
+                    "owner": owner_name,
                     "tuning_name": dialog.__class__.__name__,
+                    "is_urgent": is_modal,
                     "phone_call": dialog.get_phone_ring_type() != 0,
-                    "title": get_localized_string_context(getattr(dialog, 'title', None)),
-                    "text": get_localized_string_context(getattr(dialog, 'text', None)),
+                    "title_hash": str(getattr(dialog.title, '_string_id', '0')),
                     "responses": []
                 }
                 
@@ -93,12 +102,20 @@ def extract_game_state():
                     responses = list(dialog._get_responses_gen())
                 elif hasattr(dialog, 'responses'):
                     responses = dialog.responses
-                    
+                
                 for response in responses:
-                    resp_text = getattr(response, 'text', None)
+                    # In TS4, response IDs are things like 10001 (OK), 10002 (Cancel)
+                    r_id = getattr(response, 'dialog_response_id', 0)
+                    r_text = "OK"
+                    if hasattr(response, 'text') and response.text is not None:
+                        # We try to guess the text from common button IDs if we can't see the string
+                        if r_id == 10001: r_text = "OK"
+                        elif r_id == 10002: r_text = "Cancel"
+                        else: r_text = f"Choice {r_id}"
+                        
                     dialog_data["responses"].append({
-                        "id": response.dialog_response_id,
-                        "text": str(getattr(resp_text, 'hash', 'Unknown')) if resp_text else "OK"
+                        "id": r_id,
+                        "text": r_text
                     })
                 
                 state["active_dialogs"].append(dialog_data)
