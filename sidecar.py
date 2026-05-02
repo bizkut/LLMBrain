@@ -6,7 +6,6 @@ import uvicorn
 app = FastAPI()
 
 # Configuration: Initialize the Asynchronous LLM Client
-# Recommendation: Set OPENAI_API_KEY in your environment variables.
 client = AsyncOpenAI(
     api_key=os.getenv("OPENAI_API_KEY", "YOUR_OPENAI_API_KEY"), 
     base_url="http://127.0.0.1:1234/v1"
@@ -15,17 +14,38 @@ client = AsyncOpenAI(
 # Global history tracker to prevent repetitive decisions
 sim_history = {}
 
+def extract_json(text):
+    """Robustly extracts a single JSON object from potentially messy LLM output."""
+    try:
+        # Remove Markdown code blocks if present
+        if "```" in text:
+            blocks = text.split("```")
+            for block in blocks:
+                if "{" in block and "}" in block:
+                    text = block
+                    if text.strip().startswith("json"):
+                        text = text.strip()[4:]
+                    break
+        
+        start = text.find('{')
+        end = text.rfind('}')
+        if start == -1 or end == -1:
+            return None
+            
+        json_str = text[start:end+1].strip()
+        return json.loads(json_str)
+    except Exception:
+        return None
+
 async def process_sim_logic(sim):
     """Encapsulates the decision-making logic for a single Sim."""
     sim_id = sim["id"]
     sim_name = sim["name"]
     
-    # 1. Immediate State Checks
     if sim.get("is_sleeping"):
         return None
         
     if not sim.get("wants") and not any(v < 70 for v in sim.get("motives", {}).values()):
-        # If no wants and no needs are even slightly low, don't waste tokens
         return None
 
     current_wants = sorted(sim["wants"])
@@ -36,18 +56,14 @@ async def process_sim_logic(sim):
         sim_history[sim_id] = {'wants': [], 'cooldown': 0}
     history = sim_history[sim_id]
 
-    # 2. Concurrency Control
     if is_queued:
-        return None # Already has a next step planned
+        return None
 
     if is_executing:
         if history['wants'] and history['wants'] != current_wants:
-            # Urgent cancel if desires changed significantly during execution
             return {"sim_id": sim_id, "action": "cancel"}
-        # Allow "Thinking Ahead" if queue is empty
         print(f"🔄 {sim_name} is busy. Planning next step...")
 
-    # 3. Autonomous Completion Check
     current_actions = sim.get("current_actions", [])
     for want in sim.get("wants", []):
         want_slug = want.lower().replace(" ", "")
@@ -55,7 +71,6 @@ async def process_sim_logic(sim):
             print(f"✅ {sim_name} is already fulfilling '{want}'.")
             return None
 
-    # 4. Anti-Spam Cooldown
     if history['wants'] == current_wants and not any(v < 25 for v in sim.get("motives", {}).values()):
         history['cooldown'] += 1
         if history['cooldown'] < 3: 
@@ -63,16 +78,12 @@ async def process_sim_logic(sim):
     history['wants'] = current_wants
     history['cooldown'] = 0
 
-    # 5. Prompt Construction
     print(f"🧠 Thinking for {sim_name}...")
     motives_str = ", ".join([f"{k}: {v}%" for k, v in sim.get('motives', {}).items()])
-    
     nearby_list = []
-    # Use closest 12 objects for optimal context usage
     for obj in sim.get('nearby_objects', [])[:12]:
         choices = ", ".join(list(obj.get('interactions', {}).keys()))
         nearby_list.append(f"- {obj['name']} (ID: {obj['id']}, Dist: {obj['dist']}m): [{choices}]")
-    
     nearby_str = "\n".join(nearby_list)
 
     prompt = f"""
@@ -104,17 +115,16 @@ async def process_sim_logic(sim):
             timeout=45
         )
         content = response.choices[0].message.content
-        start, end = content.find('{'), content.rfind('}')
-        if start == -1 or end == -1: return None
+        decision = extract_json(content)
         
-        decision = json.loads(content[start:end+1])
+        if not decision:
+            print(f"⚠️ Failed to parse JSON for {sim_name}. Output: {content[:100]}...")
+            return None
+            
         decision["sim_id"] = sim_id
-        
-        # Override to high priority if survival logic is detected
         if "tier 1" in decision.get("reason", "").lower() or "survival" in decision.get("reason", "").lower():
             decision["priority"] = "high"
             
-        # Map back to internal interaction name
         readable = decision.get("interaction_name")
         target_id = decision.get("target_object_id")
         for obj in sim.get('nearby_objects', []):
@@ -136,27 +146,23 @@ async def receive_state(request: Request):
     print("\n--- GAME TICK ---")
     commands = []
 
-    # 1. Process Dialogs (Serial, as they often block the game)
     for d in state.get("active_dialogs", []):
         choices = [f"Btn {r['id']}" for r in d.get("responses", [])]
         print(f"📞 Intercepted {d['tuning']} for {d['owner']}")
-        
         prompt = f"Role: Sims 4 Controller. Event: Popup {d['tuning']} for {d['owner']}. Choices: {choices}. Goal: Pick best path. Return ONLY JSON: {{\"dialog_id\": {d['id']}, \"response_id\": ID, \"reason\": \"...\"}}"
-        
         try:
             response = await client.chat.completions.create(
                 model="Meta-Llama-3.1-8B-Instruct-abliterated-4bit",
                 messages=[{"role": "user", "content": prompt}]
             )
             content = response.choices[0].message.content
-            start, end = content.find('{'), content.rfind('}')
-            if start != -1:
-                commands.append(json.loads(content[start:end+1]))
-                break # Handle one dialog per tick
+            decision = extract_json(content)
+            if decision:
+                commands.append(decision)
+                break
         except Exception as e:
             print(f"❌ Dialog Error: {e}")
 
-    # 2. Process Sims (Parallel tasks for speed)
     sim_tasks = [process_sim_logic(sim) for sim in state.get("sims", [])]
     results = await asyncio.gather(*sim_tasks)
     commands.extend([r for r in results if r])
