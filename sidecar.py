@@ -15,13 +15,12 @@ client = AsyncOpenAI(
 sim_history = {}
 
 def extract_json(text):
-    """Robustly extracts and cleans a single JSON object from LLM output."""
+    """Robustly extracts and cleans a single JSON object or list from LLM output."""
     try:
         # 1. Handle common LLM syntax hallucinations (Python-isms)
-        # Replacing None with null, True with true, False with false
         text = text.replace(": None", ": null").replace(": True", ": true").replace(": False", ": false")
-
-        # 2. Extract first valid JSON structure
+        
+        # 2. Find the first occurrence of '{' or '['
         start_obj = text.find('{')
         start_list = text.find('[')
         
@@ -36,7 +35,7 @@ def extract_json(text):
         decoder = json.JSONDecoder()
         data, _ = decoder.raw_decode(text[start:])
         
-        # If it's a list, take the first element (common LLM behavior)
+        # If it's a list, take the first element
         if isinstance(data, list):
             return data[0] if data else None
         return data
@@ -103,6 +102,12 @@ async def process_sim_logic(sim):
     Available Objects/Actions:
     {nearby_str}
     
+    CRITICAL RELEVANCE RULE:
+    - You MUST ONLY pick an interaction if it DIRECTLY matches a Need or Want.
+    - DO NOT make wild associations (e.g., 'Sex' or 'Fighting' does NOT satisfy 'Listening to Music').
+    - If no nearby object matches an Active Want, SKIP Priority 2 and move to 3, 4, or 5.
+    - Be extremely cautious with 'Wicked' or 'Extreme' interactions; only use them if specifically requested by a Want.
+
     PRIORITY HIERARCHY (The Balanced Storyteller):
     1. SURVIVAL: If any Need is < 25%, fulfill it immediately using objects with '[Satisfies: NEED]'.
     2. WHIMS/WANTS: If Needs > 25%, fulfill an 'Active Want'. (You may purchase a Reward IF it helps).
@@ -116,7 +121,7 @@ async def process_sim_logic(sim):
     6. AUTONOMY: Pick a fun interaction fitting personality/Mood.
 
     Match the 'Want' or 'Moodlet Reason' to the best available action.
-    Return ONLY JSON: {{"target_object_id": ID, "interaction_name": "EXACT_NAME", "reason": "Tier X - Why? (e.g., Tier 3 - Cleaning to fix Filthy surroundings)", "priority": "high" or "low"}}
+    Return ONLY JSON: {{"target_object_id": ID, "interaction_name": "EXACT_NAME", "reason": "Tier X - Explanation showing a DIRECT logical link (no wild leaps).", "priority": "high" or "low"}}
     """
 
     try:
@@ -157,7 +162,6 @@ async def receive_state(request: Request):
     print("\n--- GAME TICK ---")
     commands = []
 
-    # 1. Process Dialogs (Serial, as they often block the game)
     for d in state.get("active_dialogs", []):
         d_id = d['id']
         d_owner = d['owner']
@@ -165,10 +169,8 @@ async def receive_state(request: Request):
         d_title = ", ".join(d.get("title", {}).get("tokens", [])) or "No Title"
         d_text = ", ".join(d.get("text", {}).get("tokens", [])) or "No Description"
         
-        # Format buttons
         responses = [f"Btn {r['id']}: {r['text']}" for r in d.get("responses", [])]
         
-        # Format grid items if this is a Picker
         picker_info = ""
         picker_items = d.get("picker_items", [])
         if picker_items:
@@ -185,7 +187,7 @@ async def receive_state(request: Request):
         Message: {d_text}{picker_info}
         Available Buttons: [{', '.join(responses)}]
         
-        Goal: Pick the best path. 
+        Goal: Pick the best response button. 
         - If there is a Selection Grid, you MUST pick one Item ID from it and return it as 'picked_id'.
         - Otherwise, pick a Button ID and return it as 'response_id'.
         
@@ -202,11 +204,10 @@ async def receive_state(request: Request):
             if decision:
                 print(f"🎯 Dialog Decision: {decision.get('reason')}")
                 commands.append(decision)
-                break # Handle one dialog per tick
+                break
         except Exception as e:
             print(f"❌ Dialog Error: {e}")
 
-    # 2. Process Sims (Parallel tasks for speed)
     sim_tasks = [process_sim_logic(sim) for sim in state.get("sims", [])]
     results = await asyncio.gather(*sim_tasks)
     commands.extend([r for r in results if r])
