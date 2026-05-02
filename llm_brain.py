@@ -151,14 +151,27 @@ def extract_game_state():
             if buff_component:
                 for buff in buff_component:
                     if getattr(buff, 'visible', False):
-                        b_name = buff.__class__.__name__
+                        b_type = getattr(buff, 'buff_type', buff.__class__)
+                        b_name = b_type.__name__
                         if b_name.lower().startswith('buff_'):
                             b_name = b_name[5:]
                         
                         # Format name: "DeathOfRelative" -> "Death Of Relative"
                         import re
                         temp_name = re.sub(r'(?<!^)(?=[A-Z])', ' ', b_name).strip().title()
-                        moodlets.append(temp_name)
+                        
+                        # Extract the Reason if possible (e.g., "From Dirty Surroundings")
+                        reason = ""
+                        b_reason = getattr(buff, '_buff_reason', None)
+                        if b_reason:
+                            # Try to get clue from the reason string hash or tokens
+                            reason_data = get_localized_string_context(b_reason)
+                            if reason_data["tokens"]:
+                                reason = f" (Source: {', '.join(reason_data['tokens'])})"
+                            else:
+                                reason = f" (Reason Hash: {reason_data['hash']})"
+                        
+                        moodlets.append(f"{temp_name}{reason}")
         except Exception:
             pass
             
