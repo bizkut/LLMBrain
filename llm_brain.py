@@ -259,10 +259,10 @@ def extract_game_state():
                 tracker = getattr(sim_info, '_satisfaction_tracker', None)
                 if tracker:
                     store_items = {}
-                    # Limit to top 8 affordable rewards to save context
+                    # Limit to top 15 affordable rewards to give the LLM better choice for whims
                     count = 0
                     for reward, data in tracker.SATISFACTION_STORE_ITEMS.items():
-                        if count >= 8: break
+                        if count >= 15: break
                         if data.cost <= satisfaction_points:
                             # Only show rewards that pass the Sim's internal tests (age, traits, etc.)
                             if reward.is_valid(sim_info):
