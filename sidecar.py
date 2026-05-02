@@ -24,7 +24,7 @@ def extract_json(text):
         # 2. Extract first valid JSON structure
         start_obj = text.find('{')
         start_list = text.find('[')
-...
+        
         start = -1
         if start_obj != -1 and start_list != -1: start = min(start_obj, start_list)
         elif start_obj != -1: start = start_obj
