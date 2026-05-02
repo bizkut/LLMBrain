@@ -251,6 +251,20 @@ def extract_game_state():
                             temp_name = aff_name.replace('_', ' ')
                             temp_name = re.sub(r'(?<!^)(?=[A-Z])', ' ', temp_name)
                             readable_name = temp_name.strip().title()
+                            
+                            # --- Functional Need Tags ---
+                            tags = []
+                            aff_lower = aff_name.lower()
+                            if any(x in aff_lower for x in ['hunger', 'eat', 'fridge', 'snack', 'meal', 'cook']): tags.append("Hunger")
+                            if any(x in aff_lower for x in ['energy', 'sleep', 'nap', 'bed', 'sofa_nap']): tags.append("Energy")
+                            if any(x in aff_lower for x in ['bladder', 'toilet', 'pee', 'potty']): tags.append("Bladder")
+                            if any(x in aff_lower for x in ['hygiene', 'shower', 'bath', 'wash', 'scrub']): tags.append("Hygiene")
+                            if any(x in aff_lower for x in ['social', 'chat', 'talk', 'discuss', 'joke']): tags.append("Social")
+                            if any(x in aff_lower for x in ['fun', 'play', 'game', 'watch', 'read']): tags.append("Fun")
+                            
+                            if tags:
+                                readable_name = f"{readable_name} [Satisfies: {', '.join(tags)}]"
+                                
                             available_interactions[readable_name] = aff_name
                         if available_interactions:
                             nearby_objects.append({"id": obj.id, "name": obj_name, "dist": round(dist_sq**0.5, 1), "interactions": available_interactions})
