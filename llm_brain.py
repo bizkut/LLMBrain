@@ -81,7 +81,7 @@ def extract_game_state():
 
                     state["active_dialogs"].append({
                         "id": d_id,
-                        "owner": str(dialog.owner.sim_info.full_name) if dialog.owner else "System",
+                        "owner": f"{getattr(dialog.owner.sim_info, 'first_name', '')} {getattr(dialog.owner.sim_info, 'last_name', '')}".strip() if dialog.owner else "System",
                         "tuning": dialog.__class__.__name__,
                         "is_urgent": dialog.get_phone_ring_type() == 0,
                         "responses": [{"id": r.dialog_response_id, "text": "Choice"} for r in responses]
@@ -96,7 +96,7 @@ def extract_game_state():
             if not sim or not sim.is_on_active_lot():
                 continue
                 
-            sim_name = str(sim_info.full_name).strip() or f"Sim_{sim.id}"
+            sim_name = f"{getattr(sim_info, 'first_name', '')} {getattr(sim_info, 'last_name', '')}".strip() or f"Sim_{sim.id}"
             sim_data = {
                 "id": sim.id,
                 "name": sim_name,
