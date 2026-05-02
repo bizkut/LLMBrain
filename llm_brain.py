@@ -464,3 +464,38 @@ def status_llm_mod(_connection=None):
     output(f"Network Status: {LAST_NETWORK_ERROR}")
     output(f"Last Action Status: {LAST_ACTION_STATUS}")
     output(f"Outgoing Queue Size: {outgoing_queue.qsize()}")
+
+# --- Zone Load Persistence ---
+# When traveling to a new lot, the game clears all alarms. 
+# We need to re-add our alarm if the mod was previously started.
+
+import zone
+from functools import wraps
+
+def inject_to(target_object, target_function_name):
+    def _inject_to(new_function):
+        target_function = getattr(target_object, target_function_name)
+        @wraps(target_function)
+        def _inject(*args, **kwargs):
+            return new_function(target_function, *args, **kwargs)
+        setattr(target_object, target_function_name, _inject)
+        return new_function
+    return _inject_to
+
+@inject_to(zone.Zone, 'on_loading_screen_animation_finished')
+def llm_on_zone_load(original_function, self, *args, **kwargs):
+    result = original_function(self, *args, **kwargs)
+    
+    # If the alarm was active, re-start it in the new zone
+    global brain_alarm
+    if brain_alarm is not None:
+        # Clear the old (invalid) alarm reference
+        brain_alarm = None
+        # Start fresh in this zone
+        time_span = create_time_span(minutes=POLLING_INTERVAL_MINUTES)
+        brain_alarm = alarms.add_alarm(
+            alarm_owner, time_span, brain_tick, repeating=True)
+        # Trigger an immediate tick for the new zone
+        brain_tick(None)
+        
+    return result
