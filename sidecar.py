@@ -15,12 +15,19 @@ client = AsyncOpenAI(
 sim_history = {}
 
 def extract_json(text):
-    """Robustly extracts and cleans a single JSON object or list from LLM output."""
+    """Robustly extracts and cleans a single JSON object from LLM output."""
     try:
-        # 1. Handle common LLM syntax hallucinations (Python-isms)
-        text = text.replace(": None", ": null").replace(": True", ": true").replace(": False", ": false")
+        # 1. Handle common LLM hallucinations
+        import re
+        # Fix "target_object_id": None (ID: 12345)
+        text = re.sub(r'None\s*\(ID:\s*(\d+)\)', r'\1', text)
+        # Fix "interaction_name": "Name" [Satisfies: Need]
+        text = re.sub(r'\"interaction_name\":\s*\"([^\"]+)\"\s*\[Satisfies:[^\]]+\]', r'"interaction_name": "\1"', text)
         
-        # 2. Find the first occurrence of '{' or '['
+        # Standard Python-to-JSON fixes
+        text = text.replace(": None", ": null").replace(": True", ": true").replace(": False", ": false")
+
+        # 2. Extract first valid JSON structure
         start_obj = text.find('{')
         start_list = text.find('[')
         
@@ -92,44 +99,33 @@ async def process_sim_logic(sim):
     nearby_str = "\n".join(nearby_list)
 
     prompt = f"""
-    Role: AI controlling Sim '{sim_name}' in The Sims 4.
-    Mood: {sim['mood']}
-    Moodlets (Context): {', '.join(sim.get('moodlets', []))}
-    Points: {sim.get('satisfaction_points', 0)}
-    Needs: {motives_str}
-    Active Wants: {', '.join(sim['wants'])}
-    Available Objects/Actions:
+    SYSTEM: You are the Sims 4 Logic Engine. Output ONLY JSON. NO CHAT.
+    SIM: {sim_name} (Mood: {sim['mood']})
+    CONTEXT: {', '.join(sim.get('moodlets', []))}
+    NEEDS: {motives_str}
+    WANTS: {', '.join(sim['wants'])}
+    OBJECTS:
     {nearby_str}
+    
+    HIERARCHY:
+    1. SURVIVAL: If any Need < 25%, pick object with '[Satisfies: NEED]'.
+    2. WHIMS: If Needs > 25%, pick interaction matching an 'Active Want'.
+    3. EMOTION: If negative mood, pick action to fix (Dirty -> Clean, Grungy -> Shower).
+    4. SELF-CARE: Needs < 70%.
+    5. MAINTENANCE: Clean/Repair nearby.
+    6. AUTONOMY: Pick fun action.
 
-    CRITICAL RELEVANCE RULE:
-    - You MUST ONLY pick an interaction if it DIRECTLY matches a Need or Want.
-    - Social Wants (e.g., 'Chat', 'Socialize') MUST be fulfilled by clicking on a 'Sim:' object.
-    - Pay attention to whether a Sim is 'Household' or 'Non-Household' to satisfy specific social goals.
-    - DO NOT make wild associations (e.g., 'Sex' or 'Fighting' does NOT satisfy 'Listening to Music').
-    - If no nearby object matches an Active Want, SKIP Priority 2 and move to 3, 4, or 5.
-    - Be extremely cautious with 'Wicked' or 'Extreme' interactions; only use them if specifically requested by a Want.
-
-    PRIORITY HIERARCHY (The Balanced Storyteller):
-    ...
-    1. SURVIVAL: If any Need is < 25%, fulfill it immediately using objects with '[Satisfies: NEED]'.
-    2. WHIMS/WANTS: If Needs > 25%, fulfill an 'Active Want'. (You may purchase a Reward IF it helps).
-    3. EMOTION: If Mood is negative (Sad, Angry, Tense, Uncomfortable):
-       - If Uncomfortable due to 'Dirty', 'Filthy', or 'Puddle', you MUST choose 'Clean', 'Mop', or 'Scrub'.
-       - If Uncomfortable due to 'Grungy' or 'Smelly', you MUST choose 'Shower' or 'Bath'.
-       - If Sad/Angry, choose an action to process it (e.g., 'Cry', 'Punch Bag').
-       - DO NOT pick Hunger actions (Cooking/Eating) to fix an Uncomfortable mood unless Hunger is actually low.
-    4. SELF-CARE: Address any Need < 70%.
-    5. MAINTENANCE: Clean or Repair any dirty/broken objects nearby even if not in a bad mood.
-    6. AUTONOMY: Pick a fun interaction fitting personality/Mood.
-
-    Match the 'Want' or 'Moodlet Reason' to the best available action.
-    Return ONLY JSON: {{"target_object_id": ID, "interaction_name": "EXACT_NAME", "reason": "Tier X - Explanation showing a DIRECT logical link (no wild leaps).", "priority": "high" or "low"}}
+    RULE: You MUST ONLY pick an interaction if it DIRECTLY matches the goal. 
+    Social Wants MUST use a 'Sim:' object.
+    
+    OUTPUT FORMAT: {{"target_object_id": ID, "interaction_name": "EXACT_NAME", "reason": "Short logic", "priority": "high/low"}}
     """
 
     try:
         response = await client.chat.completions.create(
             model="Meta-Llama-3.1-8B-Instruct-abliterated-4bit",
             messages=[{"role": "user", "content": prompt}],
+            temperature=0.1,
             timeout=45
         )
         content = response.choices[0].message.content
