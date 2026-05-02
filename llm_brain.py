@@ -79,9 +79,17 @@ def extract_game_state():
                         ACTIVE_DIALOGS.pop(d_id, None)
                         continue
 
+                    # Determine Owner Name safely
+                    owner_name = "System"
+                    if dialog.owner is not None:
+                        try:
+                            owner_name = (f"{dialog.owner.sim_info.first_name} {dialog.owner.sim_info.last_name}").strip()
+                        except:
+                            owner_name = "Unknown Sim"
+
                     state["active_dialogs"].append({
                         "id": d_id,
-                        "owner": f"{getattr(dialog.owner.sim_info, 'first_name', '')} {getattr(dialog.owner.sim_info, 'last_name', '')}".strip() if dialog.owner else "System",
+                        "owner": owner_name,
                         "tuning": dialog.__class__.__name__,
                         "is_urgent": dialog.get_phone_ring_type() == 0,
                         "responses": [{"id": r.dialog_response_id, "text": "Choice"} for r in responses]
@@ -96,7 +104,15 @@ def extract_game_state():
             if not sim or not sim.is_on_active_lot():
                 continue
                 
-            sim_name = f"{getattr(sim_info, 'first_name', '')} {getattr(sim_info, 'last_name', '')}".strip() or f"Sim_{sim.id}"
+            # HARDENING: More robust name extraction
+            try:
+                sim_name = (f"{sim_info.first_name} {sim_info.last_name}").strip()
+            except:
+                sim_name = f"Sim_{sim.id}"
+                
+            if not sim_name or sim_name.lower() == "none":
+                sim_name = f"Sim_{sim.id}"
+
             sim_data = {
                 "id": sim.id,
                 "name": sim_name,
@@ -263,9 +279,10 @@ def execute_command(cmd):
                 return
 
             # 5. Push Interaction
-            target = services.object_manager().get(int(cmd.get("target_object_id", 0)))
+            target_id = int(cmd.get("target_object_id", 0))
+            target = services.object_manager().get(target_id)
             if not target:
-                t_info = services.sim_info_manager().get(int(cmd.get("target_object_id", 0)))
+                t_info = services.sim_info_manager().get(target_id)
                 target = t_info.get_sim_instance() if t_info else None
             if not target: return
 
@@ -360,7 +377,15 @@ def llm_on_dialog_show(original, self, dialog, phone_ring_type, *args, **kwargs)
     if not responses:
         return original(self, dialog, phone_ring_type, *args, **kwargs)
 
-    with state_lock: ACTIVE_DIALOGS[dialog.dialog_id] = dialog
+    with state_lock: 
+        ACTIVE_DIALOGS[dialog.dialog_id] = dialog
+    
+    # URGENT: Don't wait for the next tick! Trigger an immediate state send
+    state = extract_game_state()
+    if state:
+        with outgoing_queue.mutex: outgoing_queue.queue.clear()
+        outgoing_queue.put(state)
+
     return original(self, dialog, phone_ring_type, *args, **kwargs)
 
 @inject_to(zone.Zone, 'on_loading_screen_animation_finished')
