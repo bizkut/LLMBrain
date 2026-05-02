@@ -164,7 +164,15 @@ def extract_game_state():
                                 if len(aff_name) < 5:
                                     continue
                                     
-                                readable_name = aff_name.replace('_', ' ').title()
+                                # Better Name Formatting:
+                                # 1. Split by underscore: "piano_Play" -> "piano Play"
+                                # 2. Insert space before capital letters: "sitIntimate" -> "sit Intimate"
+                                # 3. Title case: "sit Intimate" -> "Sit Intimate"
+                                import re
+                                temp_name = aff_name.replace('_', ' ')
+                                temp_name = re.sub(r'(?<!^)(?=[A-Z])', ' ', temp_name)
+                                readable_name = temp_name.strip().title()
+                                
                                 available_interactions[readable_name] = aff_name
                                         
                             if available_interactions:
