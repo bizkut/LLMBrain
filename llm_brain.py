@@ -95,9 +95,10 @@ def extract_game_state():
             if not sim:
                 continue
                 
+            sim_name = str(sim_info.full_name).strip() or f"Sim_{sim.id}"
             sim_data = {
                 "id": sim.id,
-                "name": sim_info.full_name,
+                "name": sim_name,
                 "mood": sim.get_mood().__name__ if sim.get_mood() else "Fine",
                 "is_sleeping": getattr(sim, 'sleeping', False) or any('sleep' in si.__class__.__name__.lower() for si in (sim.si_state or [])),
                 "motives": {},
@@ -349,6 +350,15 @@ def inject_to(target_object, target_function_name):
 
 @inject_to(ui.ui_dialog_service.UiDialogService, 'dialog_show')
 def llm_on_dialog_show(original, self, dialog, phone_ring_type, *args, **kwargs):
+    # HARDENING: Skip passive notifications and empty dialogs
+    d_name = dialog.__class__.__name__
+    if d_name == "UiDialogNotification":
+        return original(self, dialog, phone_ring_type, *args, **kwargs)
+        
+    responses = list(dialog._get_responses_gen()) if hasattr(dialog, '_get_responses_gen') else getattr(dialog, 'responses', [])
+    if not responses:
+        return original(self, dialog, phone_ring_type, *args, **kwargs)
+
     with state_lock: ACTIVE_DIALOGS[dialog.dialog_id] = dialog
     return original(self, dialog, phone_ring_type, *args, **kwargs)
 
