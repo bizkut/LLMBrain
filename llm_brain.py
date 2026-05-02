@@ -1,7 +1,6 @@
 import services
 import sims4.commands
 import alarms
-from date_and_time import create_time_span
 import threading
 import queue
 import urllib.request
@@ -9,321 +8,199 @@ import json
 import interactions.context
 import interactions.priority
 import ui.ui_dialog_service
-from ui.ui_dialog import PhoneRingType
 import zone
 from functools import wraps
+from date_and_time import create_time_span
 
+# --- Configuration ---
 POLLING_INTERVAL_MINUTES = 10
 SIDECAR_URL = "http://127.0.0.1:8000/api/state"
 
-# Thread-safe queues for communication between the game thread and network thread
+# --- Thread-Safe State & Queues ---
+state_lock = threading.Lock()
 outgoing_queue = queue.Queue()
 incoming_queue = queue.Queue()
+
+ACTIVE_LLM_ACTIONS = {}
+ACTIVE_DIALOGS = {}
+STATUS = {
+    "brain": "No runs yet",
+    "net": "No requests yet",
+    "action": "Idle"
+}
 
 bg_thread = None
 brain_alarm = None
 
-ACTIVE_LLM_ACTIONS = {}
-ACTIVE_DIALOGS = {}
-
-# The game's alarm system requires an object that supports weak references as the 'owner'.
 class _AlarmOwner:
     pass
 alarm_owner = _AlarmOwner()
 
-LAST_BRAIN_ERROR = "No runs yet"
-LAST_NETWORK_ERROR = "No requests yet"
-LAST_ACTION_STATUS = "No actions pushed yet"
+# --- Helper Functions ---
 
-def get_localized_string_context(localized_string):
-    """Attempt to pull meaningful text/tokens out of a LocalizedString proto."""
-    if localized_string is None:
+def get_localized_string_context(ls):
+    """Safely extracts data from localized string protocols."""
+    if ls is None:
         return {"hash": 0, "tokens": []}
-    
     tokens = []
     try:
-        # localized_string might be a proto or a wrapper.
-        # We search for tokens which often contain Sim names or object names.
-        raw_tokens = getattr(localized_string, 'tokens', [])
-        for token in raw_tokens:
-            if hasattr(token, 'raw_text'):
-                tokens.append(str(token.raw_text))
-            elif hasattr(token, 'number'):
-                tokens.append(str(token.number))
-    except Exception:
+        raw_tokens = getattr(ls, 'tokens', [])
+        for t in raw_tokens:
+            if hasattr(t, 'raw_text'):
+                tokens.append(str(t.raw_text))
+            elif hasattr(t, 'number'):
+                tokens.append(str(t.number))
+    except:
         pass
-    
-    return {
-        "hash": getattr(localized_string, 'hash', 0),
-        "tokens": tokens
-    }
+    return {"hash": getattr(ls, 'hash', 0), "tokens": tokens}
 
 def extract_game_state():
-    """Extracts basic information from controllable Sims."""
+    """Compiles the full game state for the LLM."""
     client = services.client_manager().get_first_client()
     if not client:
         return None
         
-    active_sims = client.selectable_sims
     state = {"sims": [], "active_dialogs": []}
-    
-    # 1. Collect Active Dialogs (Phone calls, popups)
     dialog_service = services.ui_dialog_service()
-    if dialog_service is not None:
-        for dialog_id, dialog in list(ACTIVE_DIALOGS.items()):
-            try:
-                # Check if the dialog is still active
-                if dialog_id not in dialog_service._active_dialogs:
-                    ACTIVE_DIALOGS.pop(dialog_id, None)
-                    continue
-                
-                # Extract button options
-                responses = []
-                if hasattr(dialog, '_get_responses_gen'):
-                    responses = list(dialog._get_responses_gen())
-                elif hasattr(dialog, 'responses'):
-                    responses = dialog.responses
-                
-                # OPTIMIZATION: If there is only one button (like an 'OK' box), 
-                # handle it locally and don't waste the LLM's tokens!
-                if len(responses) == 1:
-                    r_id = responses[0].dialog_response_id
-                    dialog_service.dialog_respond(dialog_id, r_id)
-                    ACTIVE_DIALOGS.pop(dialog_id, None)
-                    continue
+    
+    with state_lock:
+        # 1. Dialog Interception (Phone calls, popups)
+        if dialog_service is not None:
+            for d_id, dialog in list(ACTIVE_DIALOGS.items()):
+                try:
+                    if d_id not in dialog_service._active_dialogs:
+                        ACTIVE_DIALOGS.pop(d_id, None)
+                        continue
+                    
+                    # Optimization: Auto-respond to single-button popups locally
+                    responses = list(dialog._get_responses_gen()) if hasattr(dialog, '_get_responses_gen') else getattr(dialog, 'responses', [])
+                    if len(responses) == 1:
+                        dialog_service.dialog_respond(d_id, responses[0].dialog_response_id)
+                        ACTIVE_DIALOGS.pop(d_id, None)
+                        continue
 
-                # Identify if this dialog is blocking/pausing the game
-                is_modal = dialog.get_phone_ring_type() == 0 
-                
-                # Identify which Sim this belongs to
-                owner_name = "Unknown"
-                if hasattr(dialog, 'owner') and dialog.owner is not None:
-                    owner_name = f"{getattr(dialog.owner.sim_info, 'first_name', '')} {getattr(dialog.owner.sim_info, 'last_name', '')}".strip()
-                
-                # Extract basic info
-                dialog_data = {
-                    "id": dialog_id,
-                    "owner": owner_name,
-                    "tuning_name": dialog.__class__.__name__,
-                    "is_urgent": is_modal,
-                    "phone_call": dialog.get_phone_ring_type() != 0,
-                    "title_hash": str(getattr(dialog.title, '_string_id', '0')),
-                    "responses": []
-                }
-                
-                for response in responses:
-                    r_id = getattr(response, 'dialog_response_id', 0)
-                    r_text = "OK"
-                    if hasattr(response, 'text') and response.text is not None:
-                        if r_id == 10001: r_text = "OK"
-                        elif r_id == 10002: r_text = "Cancel"
-                        else: r_text = f"Choice {r_id}"
-                        
-                    dialog_data["responses"].append({
-                        "id": r_id,
-                        "text": r_text
+                    state["active_dialogs"].append({
+                        "id": d_id,
+                        "owner": str(dialog.owner.sim_info.full_name) if dialog.owner else "System",
+                        "tuning": dialog.__class__.__name__,
+                        "is_urgent": dialog.get_phone_ring_type() == 0,
+                        "responses": [{"id": r.dialog_response_id, "text": "Choice"} for r in responses]
                     })
-                
-                state["active_dialogs"].append(dialog_data)
-            except Exception:
-                continue
+                except:
+                    continue
 
-    # 2. Collect Sims
-    for sim_info in active_sims:
-        sim = sim_info.get_sim_instance()
-        if not sim:
-            continue
-            
-        # Extract Mood, Moodlets, and Wants
-        mood = "Unknown"
-        moodlets = []
-        wants = []
-        try:
-            # Grab the current mood
-            current_mood = sim.get_mood()
-            if current_mood is not None:
-                mood = current_mood.__name__
+        # 2. Sim State Extraction
+        for sim_info in client.selectable_sims:
+            sim = sim_info.get_sim_instance()
+            if not sim:
+                continue
                 
-            # Extract visible moodlets (Buffs) to give the LLM context on WHY they feel this way
+            sim_data = {
+                "id": sim.id,
+                "name": sim_info.full_name,
+                "mood": sim.get_mood().__name__ if sim.get_mood() else "Fine",
+                "is_sleeping": getattr(sim, 'sleeping', False) or any('sleep' in si.__class__.__name__.lower() for si in (sim.si_state or [])),
+                "motives": {},
+                "wants": [],
+                "moodlets": [],
+                "current_actions": [],
+                "satisfaction_points": sim_info.get_satisfaction_points(),
+                "is_llm_action_executing": False,
+                "is_llm_action_queued": False,
+                "nearby_objects": []
+            }
+            
+            # Moodlets & Reasons
             buff_component = getattr(sim_info, 'Buffs', None)
             if buff_component:
                 for buff in buff_component:
                     if getattr(buff, 'visible', False):
-                        b_type = getattr(buff, 'buff_type', buff.__class__)
-                        b_name = b_type.__name__
-                        if b_name.lower().startswith('buff_'):
-                            b_name = b_name[5:]
-                        
+                        b_name = getattr(buff, 'buff_type', buff.__class__).__name__.replace('Buff_', '').replace('buff_', '')
                         import re
-                        temp_name = re.sub(r'(?<!^)(?=[A-Z])', ' ', b_name).strip().title()
+                        clean_name = re.sub(r'(?<!^)(?=[A-Z])', ' ', b_name).strip().title()
                         
+                        # Add Reason Context
                         reason = ""
                         b_reason = getattr(buff, '_buff_reason', None)
                         if b_reason:
-                            reason_data = get_localized_string_context(b_reason)
-                            if reason_data["tokens"]:
-                                reason = f" (Source: {', '.join(reason_data['tokens'])})"
-                            else:
-                                reason = f" (Reason Hash: {reason_data['hash']})"
+                            ctx = get_localized_string_context(b_reason)
+                            if ctx["tokens"]: reason = f" (Source: {', '.join(ctx['tokens'])})"
                         
-                        moodlets.append(f"{temp_name}{reason}")
-        except Exception:
-            pass
-            
-        try:
-            # Detect if Sim is sleeping
-            is_sleeping = getattr(sim, 'sleeping', False)
-            if not is_sleeping and sim.si_state is not None:
-                for si in sim.si_state:
-                    if 'sleep' in si.__class__.__name__.lower() or 'nap' in si.__class__.__name__.lower():
-                        is_sleeping = True
-                        break
-                
-            if sim_info.whim_tracker is not None:
-                whim_slots = getattr(sim_info.whim_tracker, '_whim_slots', [])
-                for slot in whim_slots:
-                    whim_class = getattr(slot, 'whim', None)
-                    if whim_class is not None:
-                        goal_type = getattr(whim_class, 'goal', None)
-                        goal_name = goal_type.__name__ if goal_type else ""
-                        is_build_whim = False
-                        if "PurchasedObject" in goal_name or "LotTileCount" in goal_name:
-                            is_build_whim = True
-                        whim_name = whim_class.__name__
-                        if any(x in whim_name.lower() for x in ['_buy', '_purchase', '_addroom', '_build']):
-                            is_build_whim = True
-                        if is_build_whim: continue
-                        name = whim_name
-                        if name.lower().startswith('whim_'): name = name[5:]
-                        readable_name = "".join([" " + c if c.isupper() else c for c in name]).strip()
-                        wants.append(readable_name)
-                        
-            is_llm_action_executing = False
-            is_llm_action_queued = False
-            current_actions = []
-            if sim.si_state is not None:
-                for si in sim.si_state:
-                    si_name = si.__class__.__name__
-                    if any(x in si_name.lower() for x in ['idle', 'posture', 'stand', 'wait']): continue
-                    current_actions.append(si_name)
-                    
-            llm_action = ACTIVE_LLM_ACTIONS.get(sim.id)
-            if llm_action is not None:
-                is_llm_action_executing = sim.si_state is not None and llm_action in sim.si_state
-                is_llm_action_queued = getattr(sim, 'queue', None) is not None and llm_action in sim.queue
-                if not is_llm_action_executing and not is_llm_action_queued:
-                    ACTIVE_LLM_ACTIONS.pop(sim.id, None)
-        except Exception as e:
-            wants.append(f"Error: {e}")
-            
-        nearby_objects = []
-        try:
-            sim_pos = getattr(sim, 'position', None)
-            if sim_pos is not None:
-                scan_context = interactions.context.InteractionContext(sim, interactions.context.InteractionContext.SOURCE_AUTONOMY, interactions.priority.Priority.High)
-                for obj in services.object_manager().get_all():
-                    if obj.id == sim.id: continue
-                    try:
-                        if not getattr(obj, 'visible_to_client', True): continue
-                        if getattr(obj, 'parent', None) is not None: continue
-                        obj_pos = getattr(obj, 'position', None)
-                        if obj_pos is None: continue
-                        dist_sq = (sim_pos.x - obj_pos.x)**2 + (sim_pos.y - obj_pos.y)**2 + (sim_pos.z - obj_pos.z)**2
-                        affordance_attr = getattr(obj, 'super_affordances', None)
-                        if callable(affordance_attr):
-                            try:
-                                affordances = list(obj.super_affordances(context=scan_context))
-                            except Exception:
-                                affordances = getattr(obj, '_super_affordances', [])
-                        else:
-                            affordances = getattr(obj, '_super_affordances', [])
-                        if not affordances: continue
-                        obj_name = getattr(obj.definition, 'name', None) if hasattr(obj, 'definition') else None
-                        if not obj_name: obj_name = obj.__class__.__name__
-                        available_interactions = {}
-                        for aff in affordances:
-                            if len(available_interactions) >= 10: break
-                            if not hasattr(aff, 'display_name') or aff.display_name is None: continue
-                            aff_name = getattr(aff, '__name__', '')
-                            if not aff_name or aff_name.startswith('debug_') or 'cheat' in aff_name.lower(): continue
-                            if len(aff_name) < 5: continue
-                            import re
-                            temp_name = aff_name.replace('_', ' ')
-                            temp_name = re.sub(r'(?<!^)(?=[A-Z])', ' ', temp_name)
-                            readable_name = temp_name.strip().title()
-                            
-                            # --- Functional Need Tags ---
-                            tags = []
-                            aff_lower = aff_name.lower()
-                            if any(x in aff_lower for x in ['hunger', 'eat', 'fridge', 'snack', 'meal', 'cook']): tags.append("Hunger")
-                            if any(x in aff_lower for x in ['energy', 'sleep', 'nap', 'bed', 'sofa_nap']): tags.append("Energy")
-                            if any(x in aff_lower for x in ['bladder', 'toilet', 'pee', 'potty']): tags.append("Bladder")
-                            if any(x in aff_lower for x in ['hygiene', 'shower', 'bath', 'wash', 'scrub']): tags.append("Hygiene")
-                            if any(x in aff_lower for x in ['social', 'chat', 'talk', 'discuss', 'joke']): tags.append("Social")
-                            if any(x in aff_lower for x in ['fun', 'play', 'game', 'watch', 'read']): tags.append("Fun")
-                            
-                            if tags:
-                                readable_name = f"{readable_name} [Satisfies: {', '.join(tags)}]"
-                                
-                            available_interactions[readable_name] = aff_name
-                        if available_interactions:
-                            nearby_objects.append({"id": obj.id, "name": obj_name, "dist": round(dist_sq**0.5, 1), "interactions": available_interactions})
-                    except Exception: continue
-            nearby_objects.sort(key=lambda x: x.get("dist", 999))
-            nearby_objects = nearby_objects[:25]
-        except Exception as e:
-            nearby_objects.append({"error": str(e)})
-            
-        motives = {}
-        try:
+                        sim_data["moodlets"].append(f"{clean_name}{reason}")
+
+            # Motives (Needs)
             tracker = getattr(sim, 'commodity_tracker', None)
-            if tracker is not None:
+            if tracker:
                 for stat in tracker:
                     if getattr(stat, 'visible', False) and getattr(stat, 'ui_sort_order', 0) > 0:
-                        stat_name = stat.__class__.__name__
-                        if stat_name.startswith('motive_'): stat_name = stat_name[7:]
-                        val = stat.get_value()
-                        min_val = getattr(stat, 'min_value', -100)
-                        max_val = getattr(stat, 'max_value', 100)
-                        if max_val > min_val:
-                            normalized = (val - min_val) / (max_val - min_val) * 100
-                            motives[stat_name] = round(normalized, 1)
-        except Exception: pass 
+                        m_name = stat.__class__.__name__.replace('motive_', '').replace('Motive_', '')
+                        val, min_v, max_v = stat.get_value(), getattr(stat, 'min_value', -100), getattr(stat, 'max_value', 100)
+                        sim_data["motives"][m_name] = round(((val - min_v) / (max_v - min_v) * 100), 1) if max_v > min_v else 50
 
-        satisfaction_points = 0
-        try:
-            satisfaction_points = sim_info.get_satisfaction_points()
-            if satisfaction_points > 0:
-                tracker = getattr(sim_info, '_satisfaction_tracker', None)
-                if tracker:
-                    store_items = {}
-                    count = 0
-                    for reward, data in tracker.SATISFACTION_STORE_ITEMS.items():
-                        if count >= 15: break
-                        if data.cost <= satisfaction_points:
-                            if reward.is_valid(sim_info):
-                                r_name = reward.__name__
-                                if r_name.startswith('reward_'): r_name = r_name[7:]
-                                import re
-                                clean_name = re.sub(r'(?<!^)(?=[A-Z])', ' ', r_name).strip().title()
-                                display_name = f"Buy {clean_name} ({data.cost}pts)"
-                                store_items[display_name] = f"PURCHASE_{reward.guid64}"
-                                count += 1
-                    if store_items:
-                        nearby_objects.append({"id": 999, "name": "Rewards Store", "dist": 0.0, "interactions": store_items})
-        except Exception: pass
+            # Active Wants (Filtered)
+            if sim_info.whim_tracker is not None:
+                for slot in getattr(sim_info.whim_tracker, '_whim_slots', []):
+                    whim = getattr(slot, 'whim', None)
+                    if whim:
+                        w_name = whim.__name__
+                        if not any(x in w_name.lower() for x in ['_buy', '_purchase', '_build', '_addroom']):
+                            clean_w = re.sub(r'(?<!^)(?=[A-Z])', ' ', w_name.replace('whim_', '').replace('Whim_', '')).strip().title()
+                            sim_data["wants"].append(clean_w)
 
-        sim_name = f"{getattr(sim_info, 'first_name', '')} {getattr(sim_info, 'last_name', '')}".strip()
-        state["sims"].append({
-            "id": sim.id, "name": sim_name, "mood": mood, "moodlets": moodlets, "satisfaction_points": satisfaction_points,
-            "is_sleeping": is_sleeping, "current_actions": current_actions, "wants": wants, "motives": motives,
-            "is_llm_action_executing": is_llm_action_executing, "is_llm_action_queued": is_llm_action_queued,
-            "nearby_objects": nearby_objects
-        })
+            # LLM Status tracking
+            if sim.si_state:
+                sim_data["current_actions"] = [si.__class__.__name__ for si in sim.si_state if not any(x in si.__class__.__name__.lower() for x in ['idle', 'posture', 'stand'])]
+                
+            llm_action = ACTIVE_LLM_ACTIONS.get(sim.id)
+            if llm_action:
+                sim_data["is_llm_action_executing"] = sim.si_state is not None and llm_action in sim.si_state
+                sim_data["is_llm_action_queued"] = getattr(sim, 'queue', None) is not None and llm_action in sim.queue
+                if not sim_data["is_llm_action_executing"] and not sim_data["is_llm_action_queued"]:
+                    ACTIVE_LLM_ACTIONS.pop(sim.id, None)
+
+            # Object & Interaction Scan
+            scan_ctx = interactions.context.InteractionContext(sim, interactions.context.InteractionContext.SOURCE_AUTONOMY, interactions.priority.Priority.High)
+            objs = []
+            for obj in services.object_manager().get_all():
+                if obj.id == sim.id or not getattr(obj, 'visible_to_client', True) or getattr(obj, 'parent', None): continue
+                
+                affs = {}
+                try:
+                    raw_affs = list(obj.super_affordances(context=scan_ctx)) if callable(getattr(obj, 'super_affordances', None)) else getattr(obj, '_super_affordances', [])
+                    for a in raw_affs:
+                        if len(affs) >= 8: break
+                        if not hasattr(a, 'display_name') or 'debug' in a.__name__.lower() or len(a.__name__) < 5: continue
+                        
+                        # Need Tagging
+                        tags = [n for n, kw in [("Hunger", ["hunger", "eat", "fridge", "cook"]), ("Energy", ["energy", "sleep", "nap", "bed"]), ("Bladder", ["bladder", "toilet", "pee"]), ("Hygiene", ["hygiene", "shower", "bath"]), ("Social", ["social", "chat", "talk"]), ("Fun", ["fun", "play", "game"])] if any(k in a.__name__.lower() for k in kw)]
+                        name = re.sub(r'(?<!^)(?=[A-Z])', ' ', a.__name__.replace('_', ' ')).strip().title()
+                        if tags: name += f" [Satisfies: {', '.join(tags)}]"
+                        affs[name] = a.__name__
+                except: continue
+                
+                if affs:
+                    dist = ((sim.position.x - obj.position.x)**2 + (sim.position.z - obj.position.z)**2)**0.5
+                    objs.append({"id": obj.id, "name": getattr(obj.definition, 'name', obj.__class__.__name__), "dist": round(dist, 1), "interactions": affs})
+            
+            # Add Rewards Store if points available
+            if sim_data["satisfaction_points"] > 0 and getattr(sim_info, '_satisfaction_tracker', None):
+                rewards = {}
+                for reward, data in list(sim_info._satisfaction_tracker.SATISFACTION_STORE_ITEMS.items())[:15]:
+                    if data.cost <= sim_data["satisfaction_points"] and reward.is_valid(sim_info):
+                        r_name = re.sub(r'(?<!^)(?=[A-Z])', ' ', reward.__name__.replace('reward_', '')).strip().title()
+                        rewards[f"Buy {r_name} ({data.cost}pts)"] = f"PURCHASE_{reward.guid64}"
+                if rewards:
+                    objs.append({"id": 999, "name": "Rewards Store", "dist": 0.0, "interactions": rewards})
+
+            sim_data["nearby_objects"] = sorted(objs, key=lambda x: x['dist'])[:20]
+            state["sims"].append(sim_data)
+            
     return state
 
+# --- Background Networking ---
+
 def network_worker():
-    global LAST_NETWORK_ERROR
+    global STATUS
     while True:
         state = outgoing_queue.get()
         if state is None: break
@@ -334,120 +211,113 @@ def network_worker():
             response = urllib.request.urlopen(req, jsondata, timeout=60)
             resp_data = json.loads(response.read().decode('utf-8'))
             incoming_queue.put(resp_data)
-            LAST_NETWORK_ERROR = "OK"
+            STATUS["net"] = "OK"
         except Exception as e:
-            LAST_NETWORK_ERROR = f"{type(e).__name__}: {e}"
+            STATUS["net"] = f"Error: {e}"
 
-def execute_command(command):
-    global LAST_BRAIN_ERROR, LAST_ACTION_STATUS
+# --- Command Execution ---
+
+def execute_command(cmd):
+    global STATUS
     try:
-        if "dialog_id" in command:
-            d_id, r_id = int(command["dialog_id"]), int(command["response_id"])
-            if d_id in ACTIVE_DIALOGS:
-                services.ui_dialog_service().dialog_respond(d_id, r_id)
-                ACTIVE_DIALOGS.pop(d_id, None)
-                LAST_ACTION_STATUS = f"SUCCESS: Responded to dialog {d_id}"
-            return
+        with state_lock:
+            # 1. Dialog Response
+            if "dialog_id" in cmd:
+                d_id, r_id = int(cmd["dialog_id"]), int(cmd["response_id"])
+                if d_id in ACTIVE_DIALOGS:
+                    services.ui_dialog_service().dialog_respond(d_id, r_id)
+                    ACTIVE_DIALOGS.pop(d_id, None)
+                    STATUS["action"] = f"Responded to Dialog {d_id}"
+                return
 
-        sim_id = int(command.get("sim_id") or 0)
-        if command.get("action") == "cancel":
-            llm_action = ACTIVE_LLM_ACTIONS.pop(sim_id, None)
-            if llm_action is not None:
-                try: llm_action.cancel(1, "LLM Want Disappeared")
-                except Exception: pass 
-            return
-            
-        is_high_priority = str(command.get("priority", "")).lower() == "high"
-        if sim_id in ACTIVE_LLM_ACTIONS:
-            active_sim_info = services.sim_info_manager().get(sim_id)
-            active_sim = active_sim_info.get_sim_instance() if active_sim_info else None
-            if active_sim:
-                existing = ACTIVE_LLM_ACTIONS[sim_id]
-                if (active_sim.si_state is not None and existing in active_sim.si_state) or (getattr(active_sim, 'queue', None) is not None and existing in active_sim.queue):
-                    if not is_high_priority:
-                        LAST_ACTION_STATUS = f"SKIPPED: Sim {sim_id} is busy"
-                        return
-                    else:
-                        try: existing.cancel(1, "LLM Priority Override")
-                        except Exception: pass
-                        ACTIVE_LLM_ACTIONS.pop(sim_id, None)
-                else: ACTIVE_LLM_ACTIONS.pop(sim_id, None)
+            sim_id = int(cmd.get("sim_id", 0))
+            sim_info = services.sim_info_manager().get(sim_id)
+            sim = sim_info.get_sim_instance() if sim_info else None
+            if not sim: return
 
-        sim_info = services.sim_info_manager().get(sim_id)
-        interaction_name = str(command.get("interaction_name", ""))
-        if interaction_name.startswith("PURCHASE_"):
-            try:
-                reward_guid = int(interaction_name.split("_")[1])
+            # 2. Cancellation
+            if cmd.get("action") == "cancel":
+                existing = ACTIVE_LLM_ACTIONS.pop(sim_id, None)
+                if existing: existing.cancel(1, "LLM Cancel")
+                return
+
+            # 3. Busy & Priority Logic
+            is_high = str(cmd.get("priority", "")).lower() == "high"
+            existing = ACTIVE_LLM_ACTIONS.get(sim_id)
+            if existing:
+                if (sim.si_state and existing in sim.si_state) or (getattr(sim, 'queue', None) and existing in sim.queue):
+                    if not is_high: return # Busy
+                    try: existing.cancel(1, "LLM Override")
+                    except: pass
+                ACTIVE_LLM_ACTIONS.pop(sim_id, None)
+
+            # 4. Rewards Purchase
+            interaction_name = str(cmd.get("interaction_name", ""))
+            if interaction_name.startswith("PURCHASE_"):
                 tracker = getattr(sim_info, '_satisfaction_tracker', None)
                 if tracker:
-                    tracker.purchase_satisfaction_reward(reward_guid)
-                    LAST_ACTION_STATUS = f"SUCCESS: Purchased reward {reward_guid}"
-            except Exception as e: LAST_ACTION_STATUS = f"FAILED: Purchase error: {e}"
-            return
+                    tracker.purchase_satisfaction_reward(int(interaction_name.split("_")[1]))
+                    STATUS["action"] = f"Purchased Reward for {sim_id}"
+                return
 
-        raw_target = str(command.get("target_object_id", "0")).split(':')[0].strip()
-        target_id = int(raw_target) if raw_target.isdigit() else 0
-        if not sim_id or not target_id: return
-        sim = sim_info.get_sim_instance() if sim_info else None
-        if not sim: return
-        target = services.object_manager().get(target_id)
-        if not target:
-            t_info = services.sim_info_manager().get(target_id)
-            target = t_info.get_sim_instance() if t_info else None
-        if not target: return
+            # 5. Push Interaction
+            target = services.object_manager().get(int(cmd.get("target_object_id", 0)))
+            if not target:
+                t_info = services.sim_info_manager().get(int(cmd.get("target_object_id", 0)))
+                target = t_info.get_sim_instance() if t_info else None
+            if not target: return
+
+            # Find Affordance
+            scan_ctx = interactions.context.InteractionContext(sim, interactions.context.InteractionContext.SOURCE_AUTONOMY, interactions.priority.Priority.High)
+            affs = list(target.super_affordances(context=scan_ctx)) if callable(getattr(target, 'super_affordances', None)) else getattr(target, '_super_affordances', [])
             
-        affordance_attr = getattr(target, 'super_affordances', None)
-        if callable(affordance_attr):
-            try:
-                scan_context = interactions.context.InteractionContext(sim, interactions.context.InteractionContext.SOURCE_AUTONOMY, interactions.priority.Priority.High)
-                affordances = list(target.super_affordances(context=scan_context))
-            except Exception: affordances = getattr(target, '_super_affordances', [])
-        else: affordances = getattr(target, '_super_affordances', [])
-        if not affordances: return
-        
-        search_words = interaction_name.lower().replace(" ", "_").split("_")
-        scored_affordances = []
-        for aff in affordances:
-            aff_name = getattr(aff, '__name__', '').lower()
-            score = 0
-            if "_".join(search_words) in aff_name: score += 10
-            for word in search_words:
-                if len(word) > 2 and word in aff_name: score += 2
-            if score > 0: scored_affordances.append((score, aff))
-        scored_affordances.sort(key=lambda x: x[0], reverse=True)
-        affordance_to_push = scored_affordances[0][1] if scored_affordances else next(iter(affordances))
+            # Score matching
+            scored = []
+            search = interaction_name.lower().replace(" ", "_")
+            for a in affs:
+                a_name = a.__name__.lower()
+                score = 10 if search in a_name else 0
+                score += sum(2 for w in search.split("_") if len(w) > 3 and w in a_name)
+                if score > 0: scored.append((score, a))
             
-        insert_strategy, priority_level = interactions.context.QueueInsertStrategy.LAST, interactions.priority.Priority.High
-        if is_high_priority:
-            insert_strategy, priority_level = interactions.context.QueueInsertStrategy.FIRST, interactions.priority.Priority.Critical
-            if sim.si_state is not None:
+            if not scored: return
+            scored.sort(key=lambda x: x[0], reverse=True)
+            affordance = scored[0][1]
+
+            # Execution
+            insert = interactions.context.QueueInsertStrategy.FIRST if is_high else interactions.context.QueueInsertStrategy.LAST
+            priority = interactions.priority.Priority.Critical if is_high else interactions.priority.Priority.High
+            
+            if is_high and sim.si_state:
                 for si in list(sim.si_state):
-                    try: si.cancel(1, "LLM Survival Override")
-                    except Exception: pass
-        
-        context = interactions.context.InteractionContext(sim, interactions.context.InteractionContext.SOURCE_AUTONOMY, priority_level, insert_strategy=insert_strategy)
-        result = sim.push_super_affordance(affordance_to_push, target, context)
-        if result:
-            ACTIVE_LLM_ACTIONS[sim_id] = result.interaction
-            LAST_ACTION_STATUS = f"SUCCESS: Queued '{affordance_to_push.__name__}'"
-    except Exception as e: LAST_BRAIN_ERROR = f"Execute Error: {e}"
+                    try: si.cancel(1, "Survival Override")
+                    except: pass
+
+            ctx = interactions.context.InteractionContext(sim, interactions.context.InteractionContext.SOURCE_AUTONOMY, priority, insert_strategy=insert)
+            result = sim.push_super_affordance(affordance, target, ctx)
+            if result:
+                ACTIVE_LLM_ACTIONS[sim_id] = result.interaction
+                STATUS["action"] = f"Queued {affordance.__name__}"
+    except Exception as e:
+        STATUS["brain"] = f"Exec Error: {e}"
+
+# --- Game Loops ---
 
 def brain_tick(_):
-    global LAST_BRAIN_ERROR
+    global STATUS
     try:
         while not incoming_queue.empty():
-            try:
-                payload = incoming_queue.get_nowait()
-                for cmd in payload.get("commands", []): execute_command(cmd)
-            except queue.Empty: break
+            try: execute_command(incoming_queue.get_nowait())
+            except: break
+        
         state = extract_game_state()
         if state:
             with outgoing_queue.mutex: outgoing_queue.queue.clear()
             outgoing_queue.put(state)
-        LAST_BRAIN_ERROR = "OK"
+        STATUS["brain"] = "OK"
     except Exception as e:
         import traceback
-        LAST_BRAIN_ERROR = traceback.format_exc()
+        STATUS["brain"] = traceback.format_exc()
 
 @sims4.commands.Command('llm.start', command_type=sims4.commands.CommandType.Live)
 def start_llm_mod(_connection=None):
@@ -457,15 +327,16 @@ def start_llm_mod(_connection=None):
         bg_thread = threading.Thread(target=network_worker, daemon=True)
         bg_thread.start()
     if brain_alarm is None:
-        time_span = create_time_span(minutes=POLLING_INTERVAL_MINUTES)
-        brain_alarm = alarms.add_alarm(alarm_owner, time_span, brain_tick, repeating=True)
+        brain_alarm = alarms.add_alarm(alarm_owner, create_time_span(minutes=POLLING_INTERVAL_MINUTES), brain_tick, repeating=True)
         brain_tick(None)
-    output(f"LLM Polling started.")
+    output("LLM Brain Started.")
 
 @sims4.commands.Command('llm.status', command_type=sims4.commands.CommandType.Live)
 def status_llm_mod(_connection=None):
     output = sims4.commands.CheatOutput(_connection)
-    output(f"--- LLM Mod Status ---\nBrain: {LAST_BRAIN_ERROR}\nNetwork: {LAST_NETWORK_ERROR}\nLast Action: {LAST_ACTION_STATUS}")
+    output(f"--- LLM Mod Status ---\nBrain: {STATUS['brain']}\nNet: {STATUS['net']}\nAction: {STATUS['action']}")
+
+# --- Hooks & Injection ---
 
 def inject_to(target_object, target_function_name):
     def _inject_to(new_function):
@@ -477,17 +348,15 @@ def inject_to(target_object, target_function_name):
     return _inject_to
 
 @inject_to(ui.ui_dialog_service.UiDialogService, 'dialog_show')
-def llm_on_dialog_show(original_function, self, dialog, phone_ring_type, *args, **kwargs):
-    ACTIVE_DIALOGS[dialog.dialog_id] = dialog
-    return original_function(self, dialog, phone_ring_type, *args, **kwargs)
+def llm_on_dialog_show(original, self, dialog, phone_ring_type, *args, **kwargs):
+    with state_lock: ACTIVE_DIALOGS[dialog.dialog_id] = dialog
+    return original(self, dialog, phone_ring_type, *args, **kwargs)
 
 @inject_to(zone.Zone, 'on_loading_screen_animation_finished')
-def llm_on_zone_load(original_function, self, *args, **kwargs):
-    result = original_function(self, *args, **kwargs)
+def llm_on_zone_load(original, self, *args, **kwargs):
+    res = original(self, *args, **kwargs)
     global brain_alarm
-    if brain_alarm is not None:
-        brain_alarm = None
-        time_span = create_time_span(minutes=POLLING_INTERVAL_MINUTES)
-        brain_alarm = alarms.add_alarm(alarm_owner, time_span, brain_tick, repeating=True)
+    if brain_alarm:
+        brain_alarm = alarms.add_alarm(alarm_owner, create_time_span(minutes=POLLING_INTERVAL_MINUTES), brain_tick, repeating=True)
         brain_tick(None)
-    return result
+    return res
