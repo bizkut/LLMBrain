@@ -188,25 +188,40 @@ def extract_game_state():
                 if not sim_data["is_llm_action_executing"] and not sim_data["is_llm_action_queued"]:
                     ACTIVE_LLM_ACTIONS.pop(sim.id, None)
 
-            # Objects
+            # Objects & Interaction Scan
             scan_ctx = interactions.context.InteractionContext(sim, interactions.context.InteractionContext.SOURCE_AUTONOMY, interactions.priority.Priority.High)
             objs = []
             for obj in services.object_manager().get_all():
                 if obj.id == sim.id or not getattr(obj, 'visible_to_client', True) or getattr(obj, 'parent', None): continue
+                
+                is_target_sim = getattr(obj, 'is_sim', False)
+                obj_name = getattr(obj.definition, 'name', obj.__class__.__name__)
+                if is_target_sim:
+                    t_info = getattr(obj, 'sim_info', None)
+                    t_name = f"{getattr(t_info, 'first_name', 'Unknown')} {getattr(t_info, 'last_name', 'Sim')}".strip()
+                    is_h = t_info.is_player_sim if t_info else False
+                    obj_name = f"Sim: {t_name} ({'Household' if is_h else 'Non-Household'})"
+
                 affs = {}
                 try:
                     raw_affs = list(obj.super_affordances(context=scan_ctx)) if callable(getattr(obj, 'super_affordances', None)) else getattr(obj, '_super_affordances', [])
                     for a in raw_affs:
                         if len(affs) >= 8: break
                         if not hasattr(a, 'display_name') or 'debug' in a.__name__.lower() or len(a.__name__) < 5: continue
-                        tags = [n for n, kw in [("Hunger", ["hunger", "eat", "fridge", "cook"]), ("Energy", ["energy", "sleep", "nap", "bed"]), ("Bladder", ["bladder", "toilet", "pee"]), ("Hygiene", ["hygiene", "shower", "bath"]), ("Social", ["social", "chat", "talk"]), ("Fun", ["fun", "play", "game"])] if any(k in a.__name__.lower() for k in kw)]
+                        
+                        keywords = [("Hunger", ["hunger", "eat", "fridge", "cook"]), ("Energy", ["energy", "sleep", "nap", "bed"]), ("Bladder", ["bladder", "toilet", "pee"]), ("Hygiene", ["hygiene", "shower", "bath"]), ("Social", ["social", "chat", "talk", "discuss", "joke", "friendly", "mean", "funny", "romantic"]), ("Fun", ["fun", "play", "game"])]
+                        tags = [n for n, kw in keywords if any(k in a.__name__.lower() for k in kw)]
+                        
+                        if is_target_sim and not tags:
+                            tags.append("Social")
+
                         name = re.sub(r'(?<!^)(?=[A-Z])', ' ', a.__name__.replace('_', ' ')).strip().title()
                         if tags: name += f" [Satisfies: {', '.join(tags)}]"
                         affs[name] = a.__name__
                 except: continue
                 if affs:
                     dist = ((sim.position.x - obj.position.x)**2 + (sim.position.z - obj.position.z)**2)**0.5
-                    objs.append({"id": obj.id, "name": getattr(obj.definition, 'name', obj.__class__.__name__), "dist": round(dist, 1), "interactions": affs})
+                    objs.append({"id": obj.id, "name": obj_name, "dist": round(dist, 1), "interactions": affs})
             
             if sim_data["satisfaction_points"] > 0 and getattr(sim_info, '_satisfaction_tracker', None):
                 rewards = {}
@@ -240,13 +255,11 @@ def execute_command(cmd):
         with state_lock:
             if "dialog_id" in cmd:
                 d_id = int(cmd["dialog_id"])
-                # 1. Grid Selection (Picker)
                 if "picked_id" in cmd:
                     p_id = int(cmd["picked_id"])
                     services.ui_dialog_service().dialog_pick_result(d_id, [p_id])
                     ACTIVE_DIALOGS.pop(d_id, None)
                     STATUS["action"] = f"Picked {p_id} in Dialog {d_id}"
-                # 2. Button Selection
                 elif "response_id" in cmd:
                     r_id = int(cmd["response_id"])
                     if d_id in ACTIVE_DIALOGS:

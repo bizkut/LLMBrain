@@ -98,17 +98,19 @@ async def process_sim_logic(sim):
     Points: {sim.get('satisfaction_points', 0)}
     Needs: {motives_str}
     Active Wants: {', '.join(sim['wants'])}
-    
     Available Objects/Actions:
     {nearby_str}
-    
+
     CRITICAL RELEVANCE RULE:
     - You MUST ONLY pick an interaction if it DIRECTLY matches a Need or Want.
+    - Social Wants (e.g., 'Chat', 'Socialize') MUST be fulfilled by clicking on a 'Sim:' object.
+    - Pay attention to whether a Sim is 'Household' or 'Non-Household' to satisfy specific social goals.
     - DO NOT make wild associations (e.g., 'Sex' or 'Fighting' does NOT satisfy 'Listening to Music').
     - If no nearby object matches an Active Want, SKIP Priority 2 and move to 3, 4, or 5.
     - Be extremely cautious with 'Wicked' or 'Extreme' interactions; only use them if specifically requested by a Want.
 
     PRIORITY HIERARCHY (The Balanced Storyteller):
+    ...
     1. SURVIVAL: If any Need is < 25%, fulfill it immediately using objects with '[Satisfies: NEED]'.
     2. WHIMS/WANTS: If Needs > 25%, fulfill an 'Active Want'. (You may purchase a Reward IF it helps).
     3. EMOTION: If Mood is negative (Sad, Angry, Tense, Uncomfortable):
