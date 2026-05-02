@@ -44,9 +44,10 @@ def extract_game_state():
         if not sim:
             continue
             
-        # Extract Mood and Moodlets (Buffs)
+        # Extract Mood, Moodlets, and Wants
         mood = "Unknown"
         moodlets = []
+        wants = []
         try:
             # Grab the current mood
             current_mood = sim.get_mood()
