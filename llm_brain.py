@@ -90,12 +90,14 @@ def extract_game_state():
                     current_actions.append(si_name)
                     
             llm_action = ACTIVE_LLM_ACTIONS.get(sim.id)
+            is_llm_action_executing = False
+            is_llm_action_queued = False
+            
             if llm_action is not None:
-                in_si = sim.si_state is not None and llm_action in sim.si_state
-                in_queue = getattr(sim, 'queue', None) is not None and llm_action in sim.queue
-                if in_si or in_queue:
-                    has_llm_action = True
-                else:
+                is_llm_action_executing = sim.si_state is not None and llm_action in sim.si_state
+                is_llm_action_queued = getattr(sim, 'queue', None) is not None and llm_action in sim.queue
+                
+                if not is_llm_action_executing and not is_llm_action_queued:
                     ACTIVE_LLM_ACTIONS.pop(sim.id, None)
         except Exception as e:
             wants.append(f"Error: {e}")
@@ -213,7 +215,8 @@ def extract_game_state():
             "current_actions": current_actions,
             "wants": wants,
             "motives": motives,
-            "has_llm_action": has_llm_action,
+            "is_llm_action_executing": is_llm_action_executing,
+            "is_llm_action_queued": is_llm_action_queued,
             "nearby_objects": nearby_objects
         })
         
