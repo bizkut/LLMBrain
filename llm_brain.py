@@ -42,6 +42,11 @@ def get_localized_string_context(ls):
     """Safely extracts data from localized string protocols."""
     if ls is None:
         return {"hash": 0, "tokens": []}
+    
+    # Check if it's already a plain string
+    if isinstance(ls, str):
+        return {"hash": 0, "tokens": [ls]}
+        
     tokens = []
     try:
         raw_tokens = getattr(ls, 'tokens', [])
@@ -72,8 +77,9 @@ def extract_game_state():
                         ACTIVE_DIALOGS.pop(d_id, None)
                         continue
                     
-                    # Optimization: Auto-respond to single-button popups locally
                     responses = list(dialog._get_responses_gen()) if hasattr(dialog, '_get_responses_gen') else getattr(dialog, 'responses', [])
+                    
+                    # Optimization: Auto-respond to single-button popups locally
                     if len(responses) == 1:
                         dialog_service.dialog_respond(d_id, responses[0].dialog_response_id)
                         ACTIVE_DIALOGS.pop(d_id, None)
@@ -83,7 +89,7 @@ def extract_game_state():
                     owner_name = "System"
                     if dialog.owner is not None:
                         try:
-                            owner_name = (f"{dialog.owner.sim_info.first_name} {dialog.owner.sim_info.last_name}").strip()
+                            owner_name = f"{getattr(dialog.owner.sim_info, 'first_name', 'Unknown')} {getattr(dialog.owner.sim_info, 'last_name', 'Sim')}".strip()
                         except:
                             owner_name = "Unknown Sim"
 
@@ -92,6 +98,8 @@ def extract_game_state():
                         "owner": owner_name,
                         "tuning": dialog.__class__.__name__,
                         "is_urgent": dialog.get_phone_ring_type() == 0,
+                        "title": get_localized_string_context(getattr(dialog, 'title', None)),
+                        "text": get_localized_string_context(getattr(dialog, 'text', None)),
                         "responses": [{"id": r.dialog_response_id, "text": "Choice"} for r in responses]
                     })
                 except:
@@ -104,9 +112,9 @@ def extract_game_state():
             if not sim or not sim.is_on_active_lot():
                 continue
                 
-            # HARDENING: More robust name extraction
+            # HARDENING: Robust name extraction
             try:
-                sim_name = (f"{sim_info.first_name} {sim_info.last_name}").strip()
+                sim_name = f"{getattr(sim_info, 'first_name', 'Unknown')} {getattr(sim_info, 'last_name', 'Sim')}".strip()
             except:
                 sim_name = f"Sim_{sim.id}"
                 
@@ -137,7 +145,6 @@ def extract_game_state():
                         import re
                         clean_name = re.sub(r'(?<!^)(?=[A-Z])', ' ', b_name).strip().title()
                         
-                        # Add Reason Context
                         reason = ""
                         b_reason = getattr(buff, '_buff_reason', None)
                         if b_reason:
@@ -189,7 +196,6 @@ def extract_game_state():
                         if len(affs) >= 8: break
                         if not hasattr(a, 'display_name') or 'debug' in a.__name__.lower() or len(a.__name__) < 5: continue
                         
-                        # Need Tagging
                         tags = [n for n, kw in [("Hunger", ["hunger", "eat", "fridge", "cook"]), ("Energy", ["energy", "sleep", "nap", "bed"]), ("Bladder", ["bladder", "toilet", "pee"]), ("Hygiene", ["hygiene", "shower", "bath"]), ("Social", ["social", "chat", "talk"]), ("Fun", ["fun", "play", "game"])] if any(k in a.__name__.lower() for k in kw)]
                         name = re.sub(r'(?<!^)(?=[A-Z])', ' ', a.__name__.replace('_', ' ')).strip().title()
                         if tags: name += f" [Satisfies: {', '.join(tags)}]"
@@ -253,23 +259,20 @@ def execute_command(cmd):
             sim = sim_info.get_sim_instance() if sim_info else None
             if not sim: return
 
-            # 2. Cancellation
             if cmd.get("action") == "cancel":
                 existing = ACTIVE_LLM_ACTIONS.pop(sim_id, None)
                 if existing: existing.cancel(1, "LLM Cancel")
                 return
 
-            # 3. Busy & Priority Logic
             is_high = str(cmd.get("priority", "")).lower() == "high"
             existing = ACTIVE_LLM_ACTIONS.get(sim_id)
             if existing:
                 if (sim.si_state and existing in sim.si_state) or (getattr(sim, 'queue', None) and existing in sim.queue):
-                    if not is_high: return # Busy
+                    if not is_high: return
                     try: existing.cancel(1, "LLM Override")
                     except: pass
                 ACTIVE_LLM_ACTIONS.pop(sim_id, None)
 
-            # 4. Rewards Purchase
             interaction_name = str(cmd.get("interaction_name", ""))
             if interaction_name.startswith("PURCHASE_"):
                 tracker = getattr(sim_info, '_satisfaction_tracker', None)
@@ -278,7 +281,6 @@ def execute_command(cmd):
                     STATUS["action"] = f"Purchased Reward for {sim_id}"
                 return
 
-            # 5. Push Interaction
             target_id = int(cmd.get("target_object_id", 0))
             target = services.object_manager().get(target_id)
             if not target:
@@ -286,11 +288,9 @@ def execute_command(cmd):
                 target = t_info.get_sim_instance() if t_info else None
             if not target: return
 
-            # Find Affordance
             scan_ctx = interactions.context.InteractionContext(sim, interactions.context.InteractionContext.SOURCE_AUTONOMY, interactions.priority.Priority.High)
             affs = list(target.super_affordances(context=scan_ctx)) if callable(getattr(target, 'super_affordances', None)) else getattr(target, '_super_affordances', [])
             
-            # Score matching
             scored = []
             search = interaction_name.lower().replace(" ", "_")
             for a in affs:
@@ -303,7 +303,6 @@ def execute_command(cmd):
             scored.sort(key=lambda x: x[0], reverse=True)
             affordance = scored[0][1]
 
-            # Execution
             insert = interactions.context.QueueInsertStrategy.FIRST if is_high else interactions.context.QueueInsertStrategy.LAST
             priority = interactions.priority.Priority.Critical if is_high else interactions.priority.Priority.High
             
@@ -368,25 +367,26 @@ def inject_to(target_object, target_function_name):
 
 @inject_to(ui.ui_dialog_service.UiDialogService, 'dialog_show')
 def llm_on_dialog_show(original, self, dialog, phone_ring_type, *args, **kwargs):
-    # HARDENING: Skip passive notifications and empty dialogs
-    d_name = dialog.__class__.__name__
-    if d_name == "UiDialogNotification":
-        return original(self, dialog, phone_ring_type, *args, **kwargs)
-        
-    responses = list(dialog._get_responses_gen()) if hasattr(dialog, '_get_responses_gen') else getattr(dialog, 'responses', [])
-    if not responses:
-        return original(self, dialog, phone_ring_type, *args, **kwargs)
-
-    with state_lock: 
-        ACTIVE_DIALOGS[dialog.dialog_id] = dialog
+    # Call original FIRST to ensure dialog.dialog_id is assigned and registered
+    result = original(self, dialog, phone_ring_type, *args, **kwargs)
     
-    # URGENT: Don't wait for the next tick! Trigger an immediate state send
-    state = extract_game_state()
-    if state:
-        with outgoing_queue.mutex: outgoing_queue.queue.clear()
-        outgoing_queue.put(state)
+    # Skip simple notifications
+    if dialog.__class__.__name__ == "UiDialogNotification":
+        return result
 
-    return original(self, dialog, phone_ring_type, *args, **kwargs)
+    # Track any dialog that has responses (buttons)
+    responses = list(dialog._get_responses_gen()) if hasattr(dialog, '_get_responses_gen') else getattr(dialog, 'responses', [])
+    if responses:
+        with state_lock: 
+            ACTIVE_DIALOGS[dialog.dialog_id] = dialog
+        
+        # Immediate send to background thread for instant response
+        state = extract_game_state()
+        if state:
+            with outgoing_queue.mutex: outgoing_queue.queue.clear()
+            outgoing_queue.put(state)
+
+    return result
 
 @inject_to(zone.Zone, 'on_loading_screen_animation_finished')
 def llm_on_zone_load(original, self, *args, **kwargs):

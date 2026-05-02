@@ -148,10 +148,26 @@ async def receive_state(request: Request):
     print("\n--- GAME TICK ---")
     commands = []
 
+    # 1. Process Dialogs (Serial, as they often block the game)
     for d in state.get("active_dialogs", []):
-        choices = [f"Btn {r['id']}" for r in d.get("responses", [])]
-        print(f"📞 Intercepted {d['tuning']} for {d['owner']}")
-        prompt = f"Role: Sims 4 Controller. Event: Popup {d['tuning']} for {d['owner']}. Choices: {choices}. Goal: Pick best path. Return ONLY JSON: {{\"dialog_id\": {d['id']}, \"response_id\": ID, \"reason\": \"...\"}}"
+        choices = [f"Btn {r['id']}: {r['text']}" for r in d.get("responses", [])]
+        d_title = ", ".join(d.get("title", {}).get("tokens", [])) or "No Title"
+        d_text = ", ".join(d.get("text", {}).get("tokens", [])) or "No Description"
+        
+        print(f"📞 Intercepted {d['tuning']} for {d['owner']}: {d_title}")
+        
+        prompt = f"""
+        Role: Sims 4 Controller.
+        Owner: {d['owner']}
+        Dialog Type: {d['tuning']}
+        Title: {d_title}
+        Message: {d_text}
+        Available Buttons: [{', '.join(choices)}]
+        
+        Goal: Pick the best response button.
+        Return ONLY JSON: {{"dialog_id": {d['id']}, "response_id": ID, "reason": "Why?"}}
+        """
+        
         try:
             response = await client.chat.completions.create(
                 model="Meta-Llama-3.1-8B-Instruct-abliterated-4bit",
@@ -160,11 +176,13 @@ async def receive_state(request: Request):
             content = response.choices[0].message.content
             decision = extract_json(content)
             if decision:
+                print(f"🎯 Dialog Decision: {decision.get('reason')}")
                 commands.append(decision)
-                break
+                break # Handle one dialog per tick
         except Exception as e:
             print(f"❌ Dialog Error: {e}")
 
+    # 2. Process Sims (Parallel tasks for speed)
     sim_tasks = [process_sim_logic(sim) for sim in state.get("sims", [])]
     results = await asyncio.gather(*sim_tasks)
     commands.extend([r for r in results if r])
