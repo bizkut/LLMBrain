@@ -118,7 +118,7 @@ def extract_game_state():
         except Exception as e:
             wants.append(f"Error: {e}")
             
-        # Extract Nearby Interactive Objects
+        # Extract Interactive Objects across the whole lot
         nearby_objects = []
         try:
             sim_pos = getattr(sim, 'position', None)
@@ -136,73 +136,65 @@ def extract_game_state():
                         if obj_pos is None:
                             continue
                             
-                        # Calculate distance squared (x and z are the ground plane, y is height)
+                        # Calculate distance squared
                         dist_sq = (sim_pos.x - obj_pos.x)**2 + (sim_pos.y - obj_pos.y)**2 + (sim_pos.z - obj_pos.z)**2
                         
-                        # 100 means a 10-tile radius
-                        if dist_sq < 100:
-                            # Limit total nearby objects to the 15 closest to save tokens
-                            if len(nearby_objects) >= 15:
-                                continue
-                                
-                            # Retrieve Affordances
-                            affordance_attr = getattr(obj, 'super_affordances', None)
-                            if callable(affordance_attr):
-                                try:
-                                    affordances = list(obj.super_affordances())
-                                except Exception:
-                                    affordances = getattr(obj, '_super_affordances', [])
-                            else:
+                        # We no longer limit by distance (dist_sq < 100), 
+                        # allowing Sims to see objects across the whole lot.
+                        
+                        # Retrieve Affordances
+                        affordance_attr = getattr(obj, 'super_affordances', None)
+                        if callable(affordance_attr):
+                            try:
+                                affordances = list(obj.super_affordances())
+                            except Exception:
                                 affordances = getattr(obj, '_super_affordances', [])
+                        else:
+                            affordances = getattr(obj, '_super_affordances', [])
+                            
+                        if not affordances:
+                            continue
+                            
+                        if getattr(obj, 'is_sim', False):
+                            obj_name = f"Sim: {getattr(obj.sim_info, 'first_name', '')}"
+                        else:
+                            obj_name = getattr(obj.definition, 'name', None) if hasattr(obj, 'definition') else None
+                            if not obj_name:
+                                obj_name = obj.__class__.__name__
                                 
-                            if not affordances:
+                        # Extract meaningful interactions
+                        available_interactions = {}
+                        for aff in affordances:
+                            # Cap at 10 interactions per object
+                            if len(available_interactions) >= 10:
+                                break
+                                
+                            aff_name = getattr(aff, '__name__', '')
+                            if not aff_name or aff_name.startswith('debug_') or 'cheat' in aff_name.lower():
+                                continue
+                            if len(aff_name) < 5:
                                 continue
                                 
-                            if getattr(obj, 'is_sim', False):
-                                obj_name = f"Sim: {getattr(obj.sim_info, 'first_name', '')}"
-                            else:
-                                obj_name = getattr(obj.definition, 'name', None) if hasattr(obj, 'definition') else None
-                                if not obj_name:
-                                    obj_name = obj.__class__.__name__
+                            import re
+                            temp_name = aff_name.replace('_', ' ')
+                            temp_name = re.sub(r'(?<!^)(?=[A-Z])', ' ', temp_name)
+                            readable_name = temp_name.strip().title()
+                            available_interactions[readable_name] = aff_name
                                     
-                            # Extract meaningful interactions
-                            available_interactions = {}
-                            for aff in affordances:
-                                # Cap at 10 interactions per object to prevent context bloat
-                                if len(available_interactions) >= 10:
-                                    break
-                                    
-                                aff_name = getattr(aff, '__name__', '')
-                                if not aff_name or aff_name.startswith('debug_') or 'cheat' in aff_name.lower():
-                                    continue
-                                    
-                                # Heuristic: Skip very short internal names that are usually technical
-                                if len(aff_name) < 5:
-                                    continue
-                                    
-                                # Better Name Formatting:
-                                # 1. Split by underscore: "piano_Play" -> "piano Play"
-                                # 2. Insert space before capital letters: "sitIntimate" -> "sit Intimate"
-                                # 3. Title case: "sit Intimate" -> "Sit Intimate"
-                                import re
-                                temp_name = aff_name.replace('_', ' ')
-                                temp_name = re.sub(r'(?<!^)(?=[A-Z])', ' ', temp_name)
-                                readable_name = temp_name.strip().title()
-                                
-                                available_interactions[readable_name] = aff_name
-                                        
-                            if available_interactions:
-                                nearby_objects.append({
-                                    "id": obj.id,
-                                    "name": obj_name,
-                                    "dist": round(dist_sq**0.5, 1),
-                                    "interactions": available_interactions
-                                })
+                        if available_interactions:
+                            nearby_objects.append({
+                                "id": obj.id,
+                                "name": obj_name,
+                                "dist": round(dist_sq**0.5, 1),
+                                "interactions": available_interactions
+                            })
                     except Exception:
                         continue
             
-            # Sort by distance so the LLM sees the closest things first
+            # Sort by distance so the LLM sees the closest things first,
+            # but we now cap at 25 objects to allow for lot-wide scanning.
             nearby_objects.sort(key=lambda x: x.get("dist", 999))
+            nearby_objects = nearby_objects[:25]
         except Exception as e:
             nearby_objects.append({"error": str(e)})
             
