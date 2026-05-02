@@ -44,16 +44,32 @@ def extract_game_state():
         if not sim:
             continue
             
-        # Extract Wants (Whims) and Mood
-        wants = []
+        # Extract Mood and Moodlets (Buffs)
         mood = "Unknown"
-        
+        moodlets = []
         try:
             # Grab the current mood
             current_mood = sim.get_mood()
             if current_mood is not None:
                 mood = current_mood.__name__
                 
+            # Extract visible moodlets (Buffs) to give the LLM context on WHY they feel this way
+            buff_component = getattr(sim_info, 'Buffs', None)
+            if buff_component:
+                for buff in buff_component:
+                    if getattr(buff, 'visible', False):
+                        b_name = buff.__class__.__name__
+                        if b_name.lower().startswith('buff_'):
+                            b_name = b_name[5:]
+                        
+                        # Format name: "DeathOfRelative" -> "Death Of Relative"
+                        import re
+                        temp_name = re.sub(r'(?<!^)(?=[A-Z])', ' ', b_name).strip().title()
+                        moodlets.append(temp_name)
+        except Exception:
+            pass
+            
+        try:
             # Detect if Sim is sleeping
             is_sleeping = getattr(sim, 'sleeping', False)
             # Also check if any active interaction has "sleep" in the name
@@ -240,6 +256,7 @@ def extract_game_state():
             "id": sim.id,
             "name": sim_name,
             "mood": mood,
+            "moodlets": moodlets,
             "is_sleeping": is_sleeping,
             "current_actions": current_actions,
             "wants": wants,
